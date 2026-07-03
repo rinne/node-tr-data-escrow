@@ -1,11 +1,19 @@
 /** Error classes exported from the `tr-data-escrow/decrypt` subpath. */
 
-/** No configured escrow secret key matches the manifest's `metadata.kid`. */
+/**
+ * No configured escrow secret key matches the token's kid (the manifest's
+ * `metadata.kid`, or an auto-key payload's protected-header kid — the latter
+ * may also be missing entirely, leaving `kid` undefined).
+ */
 export class UnknownEscrowKeyError extends Error {
-  /** The kid the escrow was encrypted to. */
-  readonly kid: string;
-  constructor(kid: string) {
-    super(`no escrow secret key configured for kid ${JSON.stringify(kid)}`);
+  /** The kid the token was encrypted to, when it carries one. */
+  readonly kid: string | undefined;
+  constructor(kid: string | undefined) {
+    super(
+      kid === undefined
+        ? 'the encrypted payload carries no kid in its protected header'
+        : `no escrow secret key configured for kid ${JSON.stringify(kid)}`,
+    );
     this.name = 'UnknownEscrowKeyError';
     this.kid = kid;
   }

@@ -5,6 +5,7 @@
 export {
   DataEscrowDecrypt,
   type DataEscrowDecryptOptions,
+  type AutoKeyPairResult,
 } from './data-escrow-decrypt';
 export type {
   DataEscrowDecryptOperation,

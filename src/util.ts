@@ -3,6 +3,7 @@
  * convention: integer unix seconds.
  */
 import type { CompressionName } from './trde';
+import type { AutoKeyAlgorithm } from './auto-key';
 
 /**
  * Throws `TypeError` unless `value` is JSON-serializable and not `undefined`.
@@ -118,6 +119,19 @@ export interface EscrowOptionsInput {
    * Recorded only in the encrypted-file container header.
    */
   compression?: CompressionName | null;
+  /**
+   * The escrow key for this operation only: absent/`undefined` inherits the
+   * constructor key, a JWK overrides it (same validation), and **`null`**
+   * means this operation has no escrow key at all — allowed only when the
+   * operation's effective `autoKey` is `true`.
+   */
+  escrowKey?: Record<string, unknown> | null;
+  /** Enable the auto-key layer for this escrow (null/undefined: inherit). */
+  autoKey?: boolean | null;
+  /** Auto key algorithm for this escrow (null/undefined: inherit). */
+  autoKeyAlgorithm?: AutoKeyAlgorithm | null;
+  /** RSA modulus bits for an RSA-OAEP auto key (null/undefined: inherit). */
+  rsaModulusLength?: number | null;
 }
 
 /**

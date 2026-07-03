@@ -4,7 +4,7 @@ import { mkdir, open, rename, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { encrypt } from 'tr-jwe';
-import { cipherKeyGen } from 'tr-jwk';
+import { cipherKeyGen } from './key-gen';
 import { streamEncryptToFile, fsyncDir } from './vault';
 import { validateCompression, type CompressionName } from './trde';
 import { ReferenceConflictError } from './errors';
@@ -29,15 +29,34 @@ export interface AddFileOptions extends AddDataOptions {
   compression?: CompressionName | null;
 }
 
+/** The auto key pair of one escrow operation, as returned by `autoKeyPair()`. */
+export interface AutoKeyPairResult {
+  /** The auto private JWK (contains the public parameters too). */
+  secretKey: Record<string, unknown>;
+  /** The auto public JWK. */
+  publicKey: Record<string, unknown>;
+}
+
 /** @internal Context handed from {@link DataEscrow.createEscrow} to an operation. */
 export interface EscrowContext {
   escrowId: string;
+  /** The manifest `metadata.kid`: the auto kid with autoKey on, else the escrow key kid. */
   escrowKid: string;
   iat: number;
   exp: number | undefined;
   reference: string | null;
   metadataPayload: string;
   wrappingKey: Record<string, unknown>;
+  /** The `auto:`-prefixed auto key id, or null when autoKey is off. */
+  autoKid: string | null;
+  /** The generated auto key pair; present iff autoKey is on. */
+  autoKeyPair?: AutoKeyPairResult;
+  /**
+   * The cleartext auto-key.json object (`{ kid, iat, exp?, payload }`, the
+   * payload sealed to the escrow key); present iff autoKey is on **and** the
+   * operation has an escrow key. Written out at commit.
+   */
+  autoKeyFile?: Record<string, unknown>;
   /** Resolved default compression for this escrow's files. */
   fileCompression: CompressionName;
   /** `<vault>/.tmp/<escrow-id>` — already created. */
@@ -84,6 +103,7 @@ export class DataEscrowOperation {
   #filesDirCreated = false;
   #refsSeen = new Set<string>();
   #crefsSeen = new Set<string>();
+  #autoKeyPairServed = false;
 
   /** @internal Use {@link DataEscrow.createEscrow}. */
   constructor(ctx: EscrowContext) {
@@ -104,6 +124,31 @@ export class DataEscrowOperation {
   /** The escrow-level cleartext `reference` (or null). */
   get reference(): string | null {
     return this.#ctx.reference;
+  }
+
+  /** The `auto:`-prefixed auto key id, or null when autoKey is off. */
+  get autoKid(): string | null {
+    return this.#ctx.autoKid;
+  }
+
+  /**
+   * The escrow's generated auto key pair, `{ secretKey, publicKey }`, for the
+   * caller to store independently — the only recovery path when the operation
+   * has no escrow key. Returns a fresh deep copy on every call; callable any
+   * number of times while the operation is `pending` (secrets are wiped at
+   * commit/destroy). Throws `TypeError` when autoKey is not enabled for this
+   * operation or the operation is no longer pending. An accessor, not a
+   * mutator: a throwing call does not destroy the operation.
+   */
+  autoKeyPair(): AutoKeyPairResult {
+    if (this.#state !== 'pending') {
+      throw new TypeError(`escrow operation is not pending (state: ${this.#state})`);
+    }
+    if (this.#ctx.autoKeyPair === undefined) {
+      throw new TypeError('autoKeyPair(): auto key is not enabled for this escrow operation');
+    }
+    this.#autoKeyPairServed = true;
+    return structuredClone(this.#ctx.autoKeyPair);
   }
 
   /**
@@ -262,15 +307,51 @@ export class DataEscrowOperation {
   }
 
   /**
-   * Finalizes the escrow: writes `escrow.json` into the temporary directory,
+   * Finalizes the escrow: writes `escrow.json` (and, for an auto-key escrow
+   * with an escrow key, `auto-key.json`) into the temporary directory,
    * fsyncs, and atomically renames the directory into its final place in the
-   * vault. Throws `TypeError` if the escrow is empty (no data and no files).
-   * Returns the escrow-id. On success all in-memory secrets are dropped.
+   * vault. Throws `TypeError` if the escrow is empty (no data and no files),
+   * or if the operation has no escrow key and `autoKeyPair()` was never
+   * called — the latter **without** destroying the operation, so the caller
+   * can collect the key pair and commit again. Returns the escrow-id. On
+   * success all in-memory secrets are dropped.
    */
   commit(): Promise<string> {
+    // Guard before any work and outside the auto-destroy convention: with no
+    // escrow key there will be no auto-key.json, so an uncollected auto key
+    // pair would make the escrow unrecoverable from birth. The operation
+    // stays pending — recoverable by calling autoKeyPair() and committing
+    // again.
+    if (
+      this.#state === 'pending' &&
+      this.#ctx.autoKid !== null &&
+      this.#ctx.autoKeyFile === undefined &&
+      !this.#autoKeyPairServed
+    ) {
+      return Promise.reject(
+        new TypeError(
+          'cannot commit: this escrow has no escrow key and its auto key pair ' +
+            'has not been collected with autoKeyPair() — committing would make ' +
+            'the escrow unrecoverable',
+        ),
+      );
+    }
     return this.#exec(async () => {
       if (this.#dataEntries.size === 0 && this.#fileEntries.size === 0) {
         throw new TypeError('cannot commit an empty escrow (no data and no files)');
+      }
+
+      if (this.#ctx.autoKeyFile !== undefined) {
+        // The escrow-key-sealed auto secret key rides the same atomicity
+        // boundary as the manifest.
+        const autoKeyPath = join(this.#ctx.tmpDir, 'auto-key.json');
+        const akfh = await open(autoKeyPath, 'wx');
+        try {
+          await akfh.writeFile(JSON.stringify(this.#ctx.autoKeyFile, null, 2) + '\n', 'utf8');
+          await akfh.sync();
+        } finally {
+          await akfh.close();
+        }
       }
 
       const manifest: Record<string, unknown> = {
@@ -331,9 +412,11 @@ export class DataEscrowOperation {
     this.#fileEntries.clear();
     this.#refsSeen.clear();
     this.#crefsSeen.clear();
-    // Drop the wrapping-key material and the metadata token.
+    // Drop the wrapping-key material, the metadata token, and the auto key.
     (this.#ctx as { wrappingKey?: unknown }).wrappingKey = undefined;
     (this.#ctx as { metadataPayload?: unknown }).metadataPayload = undefined;
+    this.#ctx.autoKeyPair = undefined;
+    this.#ctx.autoKeyFile = undefined;
   }
 }
 

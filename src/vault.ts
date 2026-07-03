@@ -4,6 +4,7 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { encryptTrde } from './trde-encrypt';
 import type { CompressionName } from './trde';
+import { AUTO_KID_PREFIX } from './auto-key';
 
 /** Result of validating a public escrow key. */
 export interface EscrowKeyInfo {
@@ -31,6 +32,11 @@ export function validateEscrowKey(key: unknown): EscrowKeyInfo {
   const k = key as Record<string, unknown>;
   if (typeof k.kid !== 'string' || k.kid.length === 0) {
     throw new TypeError('escrowKey.kid must be a non-empty string');
+  }
+  if (k.kid.startsWith(AUTO_KID_PREFIX)) {
+    throw new TypeError(
+      `escrowKey.kid must not use the reserved ${JSON.stringify(AUTO_KID_PREFIX)} prefix`,
+    );
   }
   const kid = k.kid;
 

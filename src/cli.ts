@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import Optist from 'optist';
 import { DataEscrow, type CompressionName, type EscrowOptions } from './index';
 
@@ -103,10 +103,22 @@ async function main(): Promise<void> {
       {
         longName: 'escrow-key-file',
         hasArg: true,
-        required: true,
         optArgCb: existingFileCb,
         environment: 'OPT_ESCROW_KEY_FILE',
-        description: 'JSON file containing the public escrow key (JWK)',
+        description: 'JSON file containing the public escrow key (JWK); required unless --auto-key is given',
+      },
+      {
+        longName: 'auto-key',
+        description: 'generate a per-escrow auto key; the escrow metadata is encrypted to it',
+      },
+      {
+        longName: 'auto-key-output-file',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        requiresAlso: 'auto-key',
+        description:
+          'write the generated auto key private JWK here (mode 0600; must not exist); ' +
+          'required with --auto-key when no --escrow-key-file is given',
       },
       {
         longName: 'vault-directory',
@@ -175,12 +187,24 @@ async function main(): Promise<void> {
     fail('nothing to escrow: provide at least one --data or --file');
   }
 
-  const keyFile = opt.value('escrow-key-file') as string;
-  let escrowKey: Record<string, unknown>;
-  try {
-    escrowKey = JSON.parse(readFileSync(keyFile, 'utf8')) as Record<string, unknown>;
-  } catch (err) {
-    fail(`cannot read escrow key from ${JSON.stringify(keyFile)}: ${(err as Error).message}`);
+  const autoKey = opt.value('auto-key') as boolean;
+  const autoKeyOutputFile = opt.value('auto-key-output-file') as string | undefined;
+  const keyFile = opt.value('escrow-key-file') as string | undefined;
+  if (keyFile === undefined && !autoKey) {
+    fail('--escrow-key-file is required unless --auto-key is given');
+  }
+  if (autoKey && keyFile === undefined && autoKeyOutputFile === undefined) {
+    // Without an escrow key no auto-key.json is written; losing the auto key
+    // would make the escrow unrecoverable from birth.
+    fail('with --auto-key and no --escrow-key-file, --auto-key-output-file is required');
+  }
+  let escrowKey: Record<string, unknown> | undefined;
+  if (keyFile !== undefined) {
+    try {
+      escrowKey = JSON.parse(readFileSync(keyFile, 'utf8')) as Record<string, unknown>;
+    } catch (err) {
+      fail(`cannot read escrow key from ${JSON.stringify(keyFile)}: ${(err as Error).message}`);
+    }
   }
 
   const escrowOptions: EscrowOptions = {};
@@ -204,11 +228,23 @@ async function main(): Promise<void> {
 
   const esc = new DataEscrow({
     vaultDir: opt.value('vault-directory') as string,
-    escrowKey,
+    ...(escrowKey !== undefined ? { escrowKey } : {}),
+    ...(autoKey ? { autoKey: true } : {}),
   });
 
   const op = await esc.createEscrow(escrowOptions);
   try {
+    if (autoKeyOutputFile !== undefined) {
+      // The private JWK alone (it contains the public parameters) — the file
+      // drops directly into decrypt-escrow's --escrow-secret-key-file.
+      // Persisted before anything else happens, so a failure here can never
+      // leave a committed escrow behind without its key.
+      writeFileSync(
+        autoKeyOutputFile,
+        JSON.stringify(op.autoKeyPair().secretKey, null, 2) + '\n',
+        { flag: 'wx', mode: 0o600 },
+      );
+    }
     for (const data of dataItems) {
       await op.addData(data);
     }

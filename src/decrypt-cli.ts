@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import Optist from 'optist';
-import { DataEscrowDecrypt } from './decrypt';
+import { DataEscrowDecrypt, UnknownEscrowKeyError } from './decrypt';
 import { validateName } from './util';
 
 function existingFileCb(s: string): string | undefined {
@@ -98,7 +98,25 @@ async function main(): Promise<void> {
   }
 
   // --- decrypt the manifest ---
-  const op = await dec.decrypt(manifest);
+  // When no configured key matches and the escrow carries an auto-key.json,
+  // recover the auto key with the configured keys and retry; if the fallback
+  // fails for any reason, the original error surfaces.
+  let op;
+  try {
+    op = await dec.decrypt(manifest);
+  } catch (err) {
+    if (!(err instanceof UnknownEscrowKeyError)) throw err;
+    const autoKeyPath = join(srcDir, 'auto-key.json');
+    if (!existsSync(autoKeyPath)) throw err;
+    try {
+      const autoKeyObject: unknown = JSON.parse(readFileSync(autoKeyPath, 'utf8'));
+      const { secretKey } = await dec.decryptAutoKey(autoKeyObject);
+      const autoDec = new DataEscrowDecrypt({ escrowSecretKey: secretKey });
+      op = await autoDec.decrypt(manifest);
+    } catch {
+      throw err;
+    }
+  }
   const data = op.data();
   const fileEntries = Object.entries(data.file ?? {});
   if (fileEntries.length > 0) {

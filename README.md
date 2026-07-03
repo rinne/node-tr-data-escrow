@@ -111,8 +111,10 @@ escrow --escrow-key-file=./escrow-key.json --vault-directory=/escrow/vault \
 
 | Option | Meaning |
 |--------|---------|
-| `--escrow-key-file=<file>` | **Required.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
+| `--escrow-key-file=<file>` | **Required unless `--auto-key` is given.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
 | `--vault-directory=<dir>` | **Required.** The vault directory. Env fallback: `OPT_VAULT_DIRECTORY`. |
+| `--auto-key` | Generate a per-escrow [auto key](#auto-key) (the library default algorithm, P-521). |
+| `--auto-key-output-file=<file>` | Write the generated auto key **private JWK** here (mode 0600; the path must not exist) — usable directly as `decrypt-escrow`'s secret key file. Requires `--auto-key`; **required** when `--auto-key` is given without `--escrow-key-file`. |
 | `--reference=<string>` | Cleartext escrow reference. |
 | `--encrypted-reference=<string>` | Sealed escrow reference. |
 | `--expires-at=<timestamp>` | Absolute advisory expiry (ISO-8601 or `YYYY-MM-DD HH:MM:SS` local time). Conflicts with `--expires-after`. |
@@ -139,6 +141,7 @@ escrow … --compression=gzip \
   <prefix>/                      # first 4 characters of the escrow-id
     <escrow-id>/                 # one committed escrow (atomic rename from .tmp)
       escrow.json                # the manifest
+      auto-key.json              # only for auto-key escrows written with an escrow key
       files/                     # present only if the escrow includes files
         <file-id>                # encrypted blob, named by UUID
 ```
@@ -246,7 +249,10 @@ write-testing `<vaultDir>/.tmp` (throws on failure).
 | Option         | Type             | Default | Meaning |
 |----------------|------------------|---------|---------|
 | `vaultDir`     | `string`         | —       | **Required.** The vault directory. |
-| `escrowKey`    | JWK (public)     | —       | **Required.** See [Escrow keys](#escrow-keys). |
+| `escrowKey`    | JWK (public) `\| null` | —  | **Required unless `autoKey` is `true`.** See [Escrow keys](#escrow-keys). |
+| `autoKey`      | `boolean \| null` | `false` | Enable the per-escrow [auto key](#auto-key) layer. |
+| `autoKeyAlgorithm` | `'P-256' \| 'P-384' \| 'P-521' \| 'RSA-OAEP' \| null` | `'P-521'` | Auto key algorithm. Validated even when unused. |
+| `rsaModulusLength` | `number \| null` | `4096` | Modulus bits for `'RSA-OAEP'` auto keys: an integer, 2048–16384. Validated even when unused. |
 | `expiresAfter` | `number \| null` | none    | Default advisory expiry in **seconds** after creation, for escrows that don't set their own. Finite, `≥ 0`. (`expiresAt` is not a constructor option.) |
 | `compression`  | `'none' \| 'deflate' \| 'gzip' \| 'brotli'` | `'none'` | Default compression for file content (before encryption). `'zstd'` is a reserved container code and rejected for now. |
 
@@ -273,10 +279,15 @@ Per-escrow options (also accepted by `escrow()`):
 | `expiresAt`          | `Date \| string \| null` | Absolute advisory expiry (`Date` or ISO-8601 string). `null` = no expiry (overrides the constructor default). |
 | `expiresAfter`       | `number \| null`         | Relative advisory expiry, **seconds** after creation. `null` = no expiry (overrides the constructor default). |
 | `compression`        | `'none' \| 'deflate' \| 'gzip' \| 'brotli'` | Default file compression for this escrow, overriding the constructor default. |
+| `escrowKey`          | JWK (public) `\| null`   | Escrow key for this operation only. Absent/`undefined`: inherit the constructor key. **`null`: no escrow key** — requires effective `autoKey`. |
+| `autoKey`            | `boolean \| null`        | [Auto key](#auto-key) for this escrow (`null`/absent: inherit). |
+| `autoKeyAlgorithm`   | see constructor          | Auto key algorithm for this escrow (`null`/absent: inherit). |
+| `rsaModulusLength`   | `number \| null`         | RSA modulus bits for this escrow's auto key (`null`/absent: inherit). |
 
 Supplying both `expiresAt` and `expiresAfter` throws `TypeError`. Expiry is
 advisory: stored in the manifest (and sealed into the metadata payload), never
-enforced by this module.
+enforced by this module. One-shot `escrow()` rejects an effective-`null`
+escrow key eagerly — it could never call `autoKeyPair()`.
 
 ### `DataEscrowOperation`
 
@@ -291,8 +302,12 @@ serialized (one at a time). `state` is `pending`, then `committed` or
 | `addFile(path, options?)` | `Promise<string>` (file-id) | `options`: `{ name?, reference?, encryptedReference?, compression? }`; `name` defaults to the file's basename. |
 | `addFileStream(readable, options)` | `Promise<string>` (file-id) | Same options; `options.name` **required**. |
 | `addFileBuffer(buffer, options)` | `Promise<string>` (file-id) | Same options; `options.name` **required**. |
-| `commit()` | `Promise<string>` (escrow-id) | Throws `TypeError` if the escrow is empty. Atomic rename into the vault; drops in-memory secrets. |
+| `autoKeyPair()` | `{ secretKey, publicKey }` | Synchronous. The escrow's [auto key](#auto-key) pair (fresh deep copy each call), for independent storage. Throws when autoKey is off or the operation is not pending; a throwing call does **not** destroy the operation. |
+| `commit()` | `Promise<string>` (escrow-id) | Throws `TypeError` if the escrow is empty, or (without destroying the operation) if it has no escrow key and `autoKeyPair()` was never called. Atomic rename into the vault; drops in-memory secrets. |
 | `destroy()` | `Promise<void>` | Abandon: removes the staging directory. No-op after `commit()`. Idempotent. |
+
+The `autoKid` getter is the `auto:`-prefixed auto key id (`null` when autoKey
+is off).
 
 `name` is a restore basename (metadata only, sealed in the payload) and must
 be a legal unix filesystem path component: non-empty, ≤ 255 chars and ≤ 255
@@ -314,7 +329,44 @@ manifest and the JWE headers so a reader can select the right private key.
 
 Generate keys with [`tr-jwk`](https://www.npmjs.com/package/tr-jwk)
 (`ecKeyGen('P-521')` returns `{ secretKey, publicKey }`); keep the public half
-in the writer and the secret half under separate custody.
+in the writer and the secret half under separate custody. The `auto:` kid
+prefix is reserved for [auto keys](#auto-key) and rejected here.
+
+## Auto key
+
+An optional second key layer, default off — when unused, nothing changes.
+With `autoKey` enabled (constructor default or per operation), `createEscrow`
+generates a fresh **auto key pair** for that one escrow (algorithm per
+`autoKeyAlgorithm`; kid `auto:<uuid>`), and the manifest's metadata payload is
+encrypted to its public half instead of the escrow key — `metadata.kid`
+becomes the auto kid. Key pairs are generated asynchronously (never blocking
+the event loop, though RSA at large moduli still takes real time).
+
+The auto **private** key has two recovery paths, usable together:
+
+- **`autoKeyPair()`** on the operation returns `{ secretKey, publicKey }` for
+  the caller to store independently — the auto secret JWK opens the escrow
+  directly as a `DataEscrowDecrypt` `escrowSecretKey`.
+- **`auto-key.json`** — when the operation also has an escrow key, the auto
+  secret key is sealed to it and stored beside `escrow.json`:
+
+  ```jsonc
+  {
+    "kid": "auto:678ebcc5-45cb-4d50-8704-e5d1b297ddf8",  // auto key id
+    "iat": 1783007751,                                    // same iat as escrow.json
+    "exp": 1787007751,                                    // advisory; present iff the escrow has one
+    "payload": "ey..."                                    // JWE to the escrow public key
+  }
+  ```
+
+  The sealed claims are `{ kid, iat, exp?, key }` with `key` the auto secret
+  JWK; `DataEscrowDecrypt.decryptAutoKey()` recovers it (verifying the
+  sealed/cleartext binding).
+
+With an escrow key present the escrow stays recoverable through either path.
+Without one (`escrowKey: null` per operation, or an autoKey-only
+constructor), the auto key is the **only** path — so `commit()` refuses,
+without destroying the operation, until `autoKeyPair()` has been called.
 
 ## Failure handling
 
@@ -410,12 +462,24 @@ are relocatable, so the caller says where the encrypted container lives.
 Both classes have independent `destroy()` lifecycles: destroying the
 `DataEscrowDecrypt` does not invalidate operations it already returned.
 
+### `decryptAutoKey(autoKeyObject): Promise<{ secretKey, publicKey }>`
+
+Recovers an [auto key](#auto-key) pair from the object JSON-parsed from an
+escrow's `auto-key.json` (again, the caller reads the file). The escrow
+secret key is selected by the payload's JWE protected-header kid; the sealed
+`kid`/`iat`/`exp` are verified against their cleartext counterparts and the
+sealed key's own kid must match (`EscrowIntegrityError` otherwise). Returns
+deep copies; the recovered `secretKey` opens the escrow's `escrow.json`
+through a `DataEscrowDecrypt` of its own. An auto escrow written **without**
+an escrow key has no `auto-key.json` — only the pair stored via
+`autoKeyPair()` can open it.
+
 ### Decrypt errors
 
 | Error                    | When |
 |--------------------------|------|
 | `TypeError`              | Invalid constructor options or arguments; unknown `decrypt` options; use after `destroy()`. |
-| `UnknownEscrowKeyError`  | No configured secret key matches `metadata.kid`. Carries `.kid`. |
+| `UnknownEscrowKeyError`  | No configured secret key matches `metadata.kid` (or an auto-key payload's header kid). Carries `.kid`. |
 | `UnknownFileIdError`     | A file method's `fileId` is not a file of the escrow. Carries `.fileId`. |
 | `EscrowIntegrityError`   | A sealed claim does not match its cleartext duplicate. Carries `.field`. |
 
@@ -436,6 +500,15 @@ variable. The source directory (default `.`) is the escrow directory itself —
 it must contain `escrow.json` (plus `files/` when the escrow has files). The
 destination (default: the source directory) must already exist, be writable,
 and not yet contain `escrow-decrypted.json` or `files-decrypted`.
+
+Usage is the same for [auto-key](#auto-key) escrows. When the auto key is
+stored in the escrow (`auto-key.json` present), pass the escrow secret key
+file as always — if no configured key matches directly, the tool recovers
+the auto key with the configured keys automatically and proceeds (the
+recovered secret key is never written to the output). When the auto key is
+not stored in the escrow, pass the auto key secret JWK (the
+`escrow --auto-key-output-file` output) in place of the escrow secret key —
+it is an ordinary secret key file.
 
 It writes `escrow-decrypted.json` (the augmented manifest, as from `data()`)
 and, when the escrow has files, `files-decrypted/<name>` with each file's

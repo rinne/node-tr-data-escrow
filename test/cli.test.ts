@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
@@ -248,6 +248,112 @@ describe('escrow CLI', () => {
       ).not.toBe(0);
       // nonexistent file inside the object
       expect((await runCli([...base, '--file={"filename":"/no/such/file"}'])).code).not.toBe(0);
+    });
+  });
+
+  describe('auto key', () => {
+    it('escrows without an escrow key, writing the private JWK (mode 0600)', async () => {
+      const vaultDir = makeVaultDir();
+      const outFile = join(vaultDir, 'auto-secret.json');
+      const r = await runCli([
+        `--vault-directory=${vaultDir}`,
+        '--auto-key',
+        `--auto-key-output-file=${outFile}`,
+        '--data="via auto key"',
+      ]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const id = r.stdout.trim();
+      expect(id).toMatch(UUID_RE);
+
+      expect(statSync(outFile).mode & 0o777).toBe(0o600);
+      // a bare private JWK — usable directly as decrypt-escrow's secret key file
+      const autoSecret = JSON.parse(readFileSync(outFile, 'utf8')) as Record<string, unknown>;
+      expect(autoSecret.kid).toMatch(/^auto:/);
+      expect(autoSecret.kty).toBe('EC');
+      expect(autoSecret.crv).toBe('P-521'); // the library default
+      expect(typeof autoSecret.d).toBe('string');
+
+      const dir = escrowDir(vaultDir, id);
+      expect(readManifest(dir).metadata.kid).toBe(autoSecret.kid);
+      expect(existsSync(join(dir, 'auto-key.json'))).toBe(false);
+      expect(openEscrow(dir, autoSecret).data.map((d) => d.data)).toEqual(['via auto key']);
+    });
+
+    it('with an escrow key too, writes auto-key.json and the optional output file', async () => {
+      const vaultDir = makeVaultDir();
+      const { keyFile, secretKey } = makeKeyFile(vaultDir);
+      const outFile = join(vaultDir, 'auto-secret.json');
+      const r = await runCli([
+        `--escrow-key-file=${keyFile}`,
+        `--vault-directory=${vaultDir}`,
+        '--auto-key',
+        `--auto-key-output-file=${outFile}`,
+        '--data=42',
+      ]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const dir = escrowDir(vaultDir, r.stdout.trim());
+      const autoSecret = JSON.parse(readFileSync(outFile, 'utf8')) as Record<string, unknown>;
+      const autoKeyFile = JSON.parse(readFileSync(join(dir, 'auto-key.json'), 'utf8'));
+      expect(autoKeyFile.kid).toBe(autoSecret.kid);
+      expect(openEscrow(dir, autoSecret).data.map((d) => d.data)).toEqual([42]);
+      void secretKey; // escrow-key recovery is covered by the decrypt-cli tests
+    });
+
+    it('the output file is optional when an escrow key is present', async () => {
+      const vaultDir = makeVaultDir();
+      const { keyFile } = makeKeyFile(vaultDir);
+      const r = await runCli([
+        `--escrow-key-file=${keyFile}`,
+        `--vault-directory=${vaultDir}`,
+        '--auto-key',
+        '--data=1',
+      ]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(existsSync(join(escrowDir(vaultDir, r.stdout.trim()), 'auto-key.json'))).toBe(true);
+    });
+
+    it('enforces the option matrix', async () => {
+      const vaultDir = makeVaultDir();
+      const { keyFile } = makeKeyFile(vaultDir);
+      const outFile = join(vaultDir, 'auto-secret.json');
+
+      // no escrow key and no auto key at all
+      let r = await runCli([`--vault-directory=${vaultDir}`, '--data=1']);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain('--escrow-key-file');
+
+      // auto key without escrow key requires the output file
+      r = await runCli([`--vault-directory=${vaultDir}`, '--auto-key', '--data=1']);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain('--auto-key-output-file');
+
+      // the output file requires --auto-key (optist requiresAlso)
+      r = await runCli([
+        `--escrow-key-file=${keyFile}`,
+        `--vault-directory=${vaultDir}`,
+        `--auto-key-output-file=${outFile}`,
+        '--data=1',
+      ]);
+      expect(r.code).not.toBe(0);
+    });
+
+    it('refuses to overwrite an existing output file and leaves no escrow behind', async () => {
+      const vaultDir = makeVaultDir();
+      const outFile = join(vaultDir, 'auto-secret.json');
+      writeFileSync(outFile, 'precious existing content');
+      const r = await runCli([
+        `--vault-directory=${vaultDir}`,
+        '--auto-key',
+        `--auto-key-output-file=${outFile}`,
+        '--data=1',
+      ]);
+      expect(r.code).not.toBe(0);
+      expect(readFileSync(outFile, 'utf8')).toBe('precious existing content');
+      // the pending escrow was destroyed: nothing left in staging
+      expect(readdirSync(join(vaultDir, '.tmp'))).toEqual([]);
     });
   });
 });

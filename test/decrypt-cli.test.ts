@@ -203,4 +203,143 @@ describe('decrypt-escrow CLI', () => {
     });
     expect(stdout.trim()).toBe(s.escrowId);
   });
+
+  describe('auto key — decrypt-escrow usage stays as before', () => {
+    interface AutoSetup {
+      workDir: string;
+      srcDir: string;
+      escrowId: string;
+      escrowSecretKeyFile: string;
+      autoSecretFile: string;
+      content: Buffer;
+    }
+
+    /**
+     * A committed auto-key escrow (with an escrow key, so auto-key.json is
+     * stored) plus two key files: the escrow secret key and the auto secret
+     * key (a bare private JWK, as `escrow --auto-key-output-file` writes it).
+     */
+    async function autoSetup(): Promise<AutoSetup> {
+      const workDir = makeVaultDir();
+      const { publicKey, secretKey } = ecEscrowKeys('P-256');
+      const escrowSecretKeyFile = join(workDir, 'escrow-secret.json');
+      writeFileSync(escrowSecretKeyFile, JSON.stringify(secretKey));
+
+      const vaultDir = join(workDir, 'vault');
+      const esc = new DataEscrow({
+        vaultDir,
+        escrowKey: publicKey,
+        autoKey: true,
+        autoKeyAlgorithm: 'P-256',
+      });
+      const op = await esc.createEscrow({ reference: 'auto-restore' });
+      const autoSecretFile = join(workDir, 'auto-secret.json');
+      writeFileSync(autoSecretFile, JSON.stringify(op.autoKeyPair().secretKey));
+      await op.addData({ auto: true });
+      const content = randomBytes(1024);
+      await op.addFileBuffer(content, { name: 'auto.bin' });
+      const escrowId = await op.commit();
+      return {
+        workDir,
+        srcDir: escrowDir(vaultDir, escrowId),
+        escrowId,
+        escrowSecretKeyFile,
+        autoSecretFile,
+        content,
+      };
+    }
+
+    function expectRestored(s: AutoSetup, destDir: string): void {
+      const decrypted = JSON.parse(readFileSync(join(destDir, 'escrow-decrypted.json'), 'utf8'));
+      expect(decrypted.metadata.id).toBe(s.escrowId);
+      expect(decrypted.metadata.payloadData.ref).toBe('auto-restore');
+      expect(readFileSync(join(destDir, 'files-decrypted', 'auto.bin'))).toEqual(s.content);
+    }
+
+    it('auto key stored in the escrow: the escrow secret key file works as before', async () => {
+      const s = await autoSetup();
+      const destDir = join(s.workDir, 'restore-fallback');
+      mkdirSync(destDir);
+      const r = await runCli([
+        `--escrow-secret-key-file=${s.escrowSecretKeyFile}`,
+        s.srcDir,
+        destDir,
+      ]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(s.escrowId);
+      expectRestored(s, destDir);
+      // the recovered auto secret key is never written to the output
+      expect(readdirSync(destDir).sort()).toEqual(['escrow-decrypted.json', 'files-decrypted']);
+    });
+
+    it('the auto secret key passes in place of the escrow secret key', async () => {
+      const s = await autoSetup();
+      const destDir = join(s.workDir, 'restore-auto-secret');
+      mkdirSync(destDir);
+      const r = await runCli([`--escrow-secret-key-file=${s.autoSecretFile}`, s.srcDir, destDir]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(s.escrowId);
+      expectRestored(s, destDir);
+    });
+
+    it('the auto secret key also works inside a key array, like any other key', async () => {
+      const s = await autoSetup();
+      const mixedFile = join(s.workDir, 'mixed.json');
+      writeFileSync(
+        mixedFile,
+        JSON.stringify([
+          ecEscrowKeys().secretKey,
+          JSON.parse(readFileSync(s.autoSecretFile, 'utf8')),
+        ]),
+      );
+      const destDir = join(s.workDir, 'restore-mixed');
+      mkdirSync(destDir);
+      const r = await runCli([`--escrow-secret-key-file=${mixedFile}`, s.srcDir, destDir]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expectRestored(s, destDir);
+    });
+
+    it('fails with the original unknown-key error when nothing matches', async () => {
+      const s = await autoSetup();
+      const wrongFile = join(s.workDir, 'wrong.json');
+      writeFileSync(wrongFile, JSON.stringify(ecEscrowKeys().secretKey));
+      const destDir = join(s.workDir, 'restore-wrong');
+      mkdirSync(destDir);
+      const r = await runCli([`--escrow-secret-key-file=${wrongFile}`, s.srcDir, destDir]);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toMatch(/no escrow secret key configured/);
+      expect(readdirSync(destDir)).toEqual([]);
+    });
+
+    it('auto key not stored in the escrow: only the auto secret key restores it', async () => {
+      const workDir = makeVaultDir();
+      const vaultDir = join(workDir, 'vault');
+      const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+      const op = await esc.createEscrow();
+      const autoSecretFile = join(workDir, 'auto-secret.json');
+      writeFileSync(autoSecretFile, JSON.stringify(op.autoKeyPair().secretKey));
+      await op.addData('keyless');
+      const escrowId = await op.commit();
+      const srcDir = escrowDir(vaultDir, escrowId);
+
+      const destDir = join(workDir, 'restore');
+      mkdirSync(destDir);
+      const r = await runCli([`--escrow-secret-key-file=${autoSecretFile}`, srcDir, destDir]);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(escrowId);
+
+      // no auto-key.json exists, so a non-matching key cannot fall back
+      const wrongFile = join(workDir, 'wrong.json');
+      writeFileSync(wrongFile, JSON.stringify(ecEscrowKeys().secretKey));
+      const destDir2 = join(workDir, 'restore2');
+      mkdirSync(destDir2);
+      const r2 = await runCli([`--escrow-secret-key-file=${wrongFile}`, srcDir, destDir2]);
+      expect(r2.code).not.toBe(0);
+      expect(readdirSync(destDir2)).toEqual([]);
+    });
+  });
 });

@@ -4,9 +4,54 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.0.0] - Unreleased
+## [2.0.0] - 2026-07-03
 
-Initial implementation, ready for testing.
+### Added
+
+- **Auto key** — an optional second key layer, default off (no changes when
+  unused). New options `autoKey` (default `false`), `autoKeyAlgorithm`
+  (`P-256`/`P-384`/`P-521` default/`RSA-OAEP`), and `rsaModulusLength`
+  (2048–16384, default 4096) on the constructor, all overridable per
+  operation in `createEscrow`; `escrowKey` is likewise overridable per
+  operation, including to `null` ("no escrow key", requiring autoKey), and is
+  optional on the constructor when `autoKey` is `true`. With autoKey on, a
+  fresh key pair (kid `auto:<uuid>`; the prefix is reserved and rejected for
+  escrow keys) is generated per escrow and the manifest metadata is encrypted
+  to it; the private half is returned by the new
+  `DataEscrowOperation.autoKeyPair()` (with an `autoKid` getter) and — when
+  the operation also has an escrow key — sealed to the escrow key into a new
+  `auto-key.json` (`{ kid, iat, exp?, payload }`) beside `escrow.json`.
+  `commit()` on a no-escrow-key operation refuses (without destroying the
+  operation) until `autoKeyPair()` has been called. Decrypt side:
+  `DataEscrowDecrypt.decryptAutoKey()` recovers the pair from `auto-key.json`
+  with binding verification, and an auto escrow's `escrow.json` opens
+  directly with the auto secret JWK as `escrowSecretKey`. CLI: `escrow` gains
+  `--auto-key` (making `--escrow-key-file` optional) and
+  `--auto-key-output-file` (writes the auto key private JWK, mode 0600;
+  required when no escrow key is given); `decrypt-escrow` usage is unchanged
+  — the auto key secret passes as an ordinary secret key file, and when the
+  escrow carries an `auto-key.json` the escrow secret key works as always
+  via automatic auto-key recovery.
+- In-package key generation module (`src/key-gen.ts`) on `node:crypto`: key
+  pairs asynchronously off the event loop, symmetric keys with a
+  tr-jwk-output-compatible `cipherKeyGen` (embedded-JWK payload shape
+  unchanged; the on-disk escrow format is untouched and remains fully
+  compatible with 1.0.0).
+
+### Changed
+
+- `DataEscrow`'s `escrowKid` getter is now `string | null` (`null` for an
+  autoKey-only instance constructed without an escrow key).
+- `UnknownEscrowKeyError.kid` is now `string | undefined` (`undefined` when
+  an auto-key payload carries no kid in its protected header).
+- Dependencies: `tr-jwk` dropped from runtime dependencies (now dev-only;
+  the wrapping/content key generation moved in-package with identical
+  output); `tr-jwe` bumped to `^1.1.0` (feature-identical) and is the sole
+  runtime dependency.
+
+## [1.0.0] - 2026-07-02
+
+Initial implementation.
 
 ### Added
 

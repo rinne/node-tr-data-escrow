@@ -62,6 +62,91 @@ function validateEscrowSecretKey(key: unknown): { kid: string; jwk: Record<strin
   return { kid: k.kid, jwk: structuredClone(k) };
 }
 
+/**
+ * The auto key pair recovered by {@link DataEscrowDecrypt.decryptAutoKey}.
+ * Mirrors the writer's `DataEscrowOperation.autoKeyPair()` result shape.
+ */
+export interface AutoKeyPairResult {
+  /** The auto private JWK (contains the public parameters too). */
+  secretKey: Record<string, unknown>;
+  /** The auto public JWK, derived from the secret key. */
+  publicKey: Record<string, unknown>;
+}
+
+/**
+ * Reserved kid prefix of auto keys (duplicated from the writer side so the
+ * decrypt subpath keeps loading zero writer code; part of the on-disk
+ * contract, not an implementation detail).
+ */
+const AUTO_KID_PREFIX = 'auto:';
+
+/** The kid from a compact JWE's protected header, or undefined. */
+function jweProtectedHeaderKid(token: string): string | undefined {
+  try {
+    const header: unknown = JSON.parse(
+      Buffer.from(token.slice(0, token.indexOf('.')), 'base64url').toString('utf8'),
+    );
+    if (header && typeof header === 'object' && !Array.isArray(header)) {
+      const kid = (header as Record<string, unknown>).kid;
+      if (typeof kid === 'string' && kid.length > 0) return kid;
+    }
+  } catch {
+    /* fall through */
+  }
+  return undefined;
+}
+
+interface AutoKeyFileShape {
+  kid: string;
+  iat: number;
+  exp?: number;
+  payload: string;
+}
+
+/** Rough auto-key.json shape validation; throws `TypeError`. */
+function validateAutoKeyShape(autoKeyObject: unknown): AutoKeyFileShape {
+  if (!autoKeyObject || typeof autoKeyObject !== 'object' || Array.isArray(autoKeyObject)) {
+    throw new TypeError('autoKeyObject must be the object parsed from auto-key.json');
+  }
+  const o = autoKeyObject as Record<string, unknown>;
+  if (
+    typeof o.kid !== 'string' ||
+    o.kid.length <= AUTO_KID_PREFIX.length ||
+    !o.kid.startsWith(AUTO_KID_PREFIX)
+  ) {
+    throw new TypeError(
+      `autoKeyObject.kid must be a ${JSON.stringify(AUTO_KID_PREFIX)}-prefixed string`,
+    );
+  }
+  if (typeof o.iat !== 'number' || !Number.isInteger(o.iat)) {
+    throw new TypeError('autoKeyObject.iat must be an integer (unix seconds)');
+  }
+  if (o.exp !== undefined && (typeof o.exp !== 'number' || !Number.isInteger(o.exp))) {
+    throw new TypeError('autoKeyObject.exp must be an integer (unix seconds) when present');
+  }
+  if (typeof o.payload !== 'string' || o.payload.length === 0) {
+    throw new TypeError('autoKeyObject.payload must be a non-empty string');
+  }
+  return o as unknown as AutoKeyFileShape;
+}
+
+/** Derives the public JWK of an auto secret key (drops the private members). */
+function derivePublicJwk(secret: Record<string, unknown>): Record<string, unknown> {
+  if (secret.kty === 'RSA') {
+    return {
+      kty: 'RSA',
+      n: secret.n,
+      e: secret.e,
+      ...(secret.alg !== undefined ? { alg: secret.alg } : {}),
+      kid: secret.kid,
+    };
+  }
+  if (secret.kty === 'EC') {
+    return { kty: 'EC', crv: secret.crv, x: secret.x, y: secret.y, kid: secret.kid };
+  }
+  throw new EscrowIntegrityError('autoKey.key.kty', 'unsupported auto key type');
+}
+
 /** `decrypt`'s options are reserved: an object with no (known) keys yet. */
 function validateDecryptOptions(options: unknown): void {
   if (options === undefined) return;
@@ -271,10 +356,60 @@ export class DataEscrowDecrypt {
   }
 
   /**
+   * Recovers an escrow's auto key pair from the object JSON-parsed from its
+   * `auto-key.json` (no filesystem I/O here). The escrow secret key is
+   * selected by the payload's JWE protected-header kid; the sealed
+   * `kid`/`iat`/`exp` claims are verified against their cleartext
+   * counterparts (absence included), and the sealed key's own kid must match.
+   * Returns deep copies; the public key is derived from the secret JWK.
+   *
+   * Throws {@link UnknownEscrowKeyError} when the header kid is missing or
+   * matches no configured key, {@link EscrowIntegrityError} on a binding
+   * mismatch, `TypeError` on an invalid shape or a destroyed instance, and
+   * propagates payload decryption failures (wrapped with context).
+   */
+  async decryptAutoKey(autoKeyObject: unknown): Promise<AutoKeyPairResult> {
+    if (this.#keys === null) {
+      throw new TypeError('DataEscrowDecrypt instance is destroyed');
+    }
+    const shape = validateAutoKeyShape(autoKeyObject);
+    const headerKid = jweProtectedHeaderKid(shape.payload);
+    const secretKey = headerKid === undefined ? undefined : this.#keys.get(headerKid);
+    if (secretKey === undefined) {
+      throw new UnknownEscrowKeyError(headerKid);
+    }
+
+    let claims: Record<string, unknown>;
+    try {
+      claims = asClaimsObject(jweDecrypt(shape.payload, secretKey));
+    } catch (err) {
+      throw new Error('failed to decrypt auto-key payload', { cause: err });
+    }
+
+    // Sealed claims must match their cleartext duplicates, absence included.
+    verifyBinding('autoKey.kid', claims.kid, shape.kid);
+    verifyBinding('autoKey.iat', claims.iat, shape.iat);
+    verifyBinding('autoKey.exp', claims.exp, shape.exp);
+
+    const key = claims.key;
+    if (!key || typeof key !== 'object' || Array.isArray(key)) {
+      throw new EscrowIntegrityError('autoKey.key', 'auto secret key missing');
+    }
+    const secretJwk = structuredClone(key) as Record<string, unknown>;
+    if (secretJwk.kid !== shape.kid) {
+      throw new EscrowIntegrityError(
+        'autoKey.key.kid',
+        `sealed ${formatBindingValue(secretJwk.kid)} vs ${formatBindingValue(shape.kid)}`,
+      );
+    }
+    return { secretKey: secretJwk, publicKey: derivePublicJwk(secretJwk) };
+  }
+
+  /**
    * Clears the internal references to the configured escrow secret keys and
-   * invalidates the object: `decrypt()` throws afterwards. Operations already
-   * returned are unaffected — they hold their own key material. Synchronous,
-   * idempotent.
+   * invalidates the object: `decrypt()` and `decryptAutoKey()` throw
+   * afterwards. Operations already returned are unaffected — they hold their
+   * own key material. Synchronous, idempotent.
    */
   destroy(): void {
     this.#keys?.clear();
