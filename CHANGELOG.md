@@ -10,9 +10,16 @@ No functional changes.
 
 ### Added
 
-- `JWT-KEY-EMBEDDING.md`: the optional `public_key` property of
+- `JWE-KEY-EMBEDDING.md`: the optional `public_key` property of
   `embedded_key_info` — a deliberate, cleartext disclosure of the public
   half of the embedded private key, with kid-matching rules.
+
+### Changed
+
+- The key-embedding specification was renamed from `JWT-KEY-EMBEDDING.md`
+  (as introduced in 2.1.1) to `JWE-KEY-EMBEDDING.md`: the encapsulating
+  format is JWE, not JWT. (The document's references to JWT conventions —
+  NumericDate timestamps and claim names — are intentional and unchanged.)
 
 ## [2.1.1] - 2026-07-03
 

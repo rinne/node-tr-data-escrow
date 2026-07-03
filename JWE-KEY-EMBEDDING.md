@@ -1,4 +1,4 @@
-# JWT Key Embedding
+# JWE Key Embedding
 
 A convention for embedding a cryptographic key into a JWE.
 

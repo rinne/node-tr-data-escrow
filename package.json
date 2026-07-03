@@ -32,7 +32,7 @@
         "dist",
         "README.md",
         "CHANGELOG.md",
-        "JWT-KEY-EMBEDDING.md",
+        "JWE-KEY-EMBEDDING.md",
         "LICENSE"
     ],
     "engines": {
