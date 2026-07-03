@@ -53,12 +53,13 @@ each of which is OPTIONAL:
 
 ```jsonc
 {
-  "iat": 1783007751,   // issued-at, JWT NumericDate convention
-  "exp": 1787007751,   // expires, JWT NumericDate convention
-  "nbf": 1783007751,   // not-before, JWT NumericDate convention
-  "kid": "key-2026",   // key identifier of the embedded key
-  "kty": "EC",         // key type of the embedded key
-  "alg": "ECDH-ES"     // algorithm of the embedded key
+  "iat": 1783007751,     // issued-at, JWT NumericDate convention
+  "exp": 1787007751,     // expires, JWT NumericDate convention
+  "nbf": 1783007751,     // not-before, JWT NumericDate convention
+  "kid": "key-2026",     // key identifier of the embedded key
+  "kty": "EC",           // key type of the embedded key
+  "alg": "ECDH-ES",      // algorithm of the embedded key
+  "public_key": { "…": "…" }  // public JWK of the embedded private key
 }
 ```
 
@@ -67,10 +68,30 @@ each of which is OPTIONAL:
   policy.
 - `kid`, `kty`, and `alg` expose the corresponding properties of the
   embedded key object.
+- `public_key` exposes the public part of the embedded private key; see
+  Section 4.1.
 - Properties not listed above MUST NOT appear inside
   `embedded_key_info`.
 
-### 4.1. Usage patterns
+### 4.1. The `public_key` property
+
+`embedded_key_info` MAY include the property **`public_key`**, whose
+value is a JWK object representing the public part of the embedded
+private key.
+
+- `public_key` is strictly OPTIONAL, and SHOULD be used only when the
+  public key part is particularly something that the user wants to have
+  directly visible from the JWE without decrypting it.
+- `public_key` MUST only be used when the embedded key is an asymmetric
+  **private** key, and its value MUST be the public JWK corresponding to
+  that private key. It MUST NOT contain private key material.
+- If a `public_key` is revealed and the embedded private key has a
+  `kid`, the public key SHOULD also include the matching `kid`. The
+  public key MUST NOT include a conflicting `kid`.
+- If `embedded_key_info` itself includes the `kid` property, the public
+  key MUST NOT include a `kid` conflicting with it.
+
+### 4.2. Usage patterns
 
 - It is typical to use `embedded_key_info` to expose only a subset — for
   example only `kty` — and it is also very usual to omit
@@ -81,22 +102,24 @@ each of which is OPTIONAL:
 - The absence of `embedded_key_info` carries no meaning: a JWE without it
   may or may not contain an embedded key.
 
-### 4.2. Consistency
+### 4.3. Consistency
 
 When `embedded_key_info` carries a value, the producer MUST ensure it is
 consistent with the embedded key: `kid`, `kty`, and `alg` MUST equal the
 same-named properties of the `key` claim's JWK (when those properties are
-present in the JWK), and `iat`/`exp`/`nbf` MUST equal the same-named
-claims of the encrypted payload when the payload carries them. A consumer
-MAY verify this consistency after decryption and MAY treat a mismatch as
-an error.
+present in the JWK), `iat`/`exp`/`nbf` MUST equal the same-named claims
+of the encrypted payload when the payload carries them, and `public_key`
+MUST be the public counterpart of the embedded private key (Section 4.1).
+A consumer MAY verify this consistency after decryption and MAY treat a
+mismatch as an error.
 
-### 4.3. Header placement
+### 4.4. Header placement
 
 `embedded_key_info` MUST be placed in the JWE **protected** header, so
 that it is integrity-protected by the JWE itself. It MUST NOT appear in
 an unprotected header. Note that protection is integrity only: everything
-in the header is readable by anyone holding the token.
+in the header — including a `public_key` — is readable by anyone holding
+the token.
 
 ## 5. Examples
 
@@ -151,6 +174,27 @@ Protected header — signalling an embedded key while revealing nothing:
 }
 ```
 
+Protected header — deliberately revealing the public half of an embedded
+private key (with the matching `kid`):
+
+```json
+{
+  "alg": "RSA-OAEP",
+  "enc": "A256GCM",
+  "kid": "escrow-key-2026",
+  "embedded_key_info": {
+    "kid": "auto:678ebcc5-45cb-4d50-8704-e5d1b297ddf8",
+    "public_key": {
+      "kty": "EC",
+      "crv": "P-521",
+      "x": "…",
+      "y": "…",
+      "kid": "auto:678ebcc5-45cb-4d50-8704-e5d1b297ddf8"
+    }
+  }
+}
+```
+
 ## 6. Security considerations
 
 - The confidentiality of the embedded key is exactly the confidentiality
@@ -161,6 +205,11 @@ Protected header — signalling an embedded key while revealing nothing:
   about the embedded key; producers SHOULD expose only what consumers
   genuinely need, and omit `embedded_key_info` (or use the empty object)
   otherwise.
+- A `public_key` reveals the entire public half of the embedded private
+  key to every holder of the token — including the ability to encrypt to
+  it or verify signatures made with it, and to correlate the token with
+  other uses of the same key pair. Producers MUST treat this as a
+  deliberate disclosure decision, never a default.
 - An `embedded_key_info` outside the protected header would be malleable,
   which is why Section 4.3 forbids it. A consumer encountering one in an
   unprotected header MUST NOT rely on its contents.
