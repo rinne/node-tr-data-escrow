@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-07-03
+
+No functional changes.
+
+### Added
+
+- `JWT-KEY-EMBEDDING.md`: a formal specification of the convention for
+  embedding a JWK inside a JWE — a mandatory `key` claim in the encrypted
+  payload plus an optional `embedded_key_info` protected-header object.
+  The escrow's `auto-key.json` payload follows this convention. The
+  document is included in the published package.
+
 ## [2.1.0] - 2026-07-03
 
 ### Added
