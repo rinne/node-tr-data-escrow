@@ -113,7 +113,8 @@ escrow --escrow-key-file=./escrow-key.json --vault-directory=/escrow/vault \
 |--------|---------|
 | `--escrow-key-file=<file>` | **Required unless `--auto-key` is given.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
 | `--vault-directory=<dir>` | **Required.** The vault directory. Env fallback: `OPT_VAULT_DIRECTORY`. |
-| `--auto-key` | Generate a per-escrow [auto key](#auto-key) (the library default algorithm, P-521). |
+| `--auto-key` | Generate a per-escrow [auto key](#auto-key). |
+| `--auto-key-algorithm=<alg>` | `P-256`, `P-384`, `P-521` (default), or `RSA-OAEP` (always a 4096-bit modulus). Requires `--auto-key`. |
 | `--auto-key-output-file=<file>` | Write the generated auto key **private JWK** here (mode 0600; the path must not exist) — usable directly as `decrypt-escrow`'s secret key file. Requires `--auto-key`; **required** when `--auto-key` is given without `--escrow-key-file`. |
 | `--reference=<string>` | Cleartext escrow reference. |
 | `--encrypted-reference=<string>` | Sealed escrow reference. |

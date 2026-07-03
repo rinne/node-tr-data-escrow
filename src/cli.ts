@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import Optist from 'optist';
-import { DataEscrow, type CompressionName, type EscrowOptions } from './index';
+import {
+  DataEscrow,
+  type AutoKeyAlgorithm,
+  type CompressionName,
+  type EscrowOptions,
+} from './index';
 
 /** Any valid JSON text → the parsed value; invalid → undefined (optist failure). */
 function jsonCb(s: string): unknown {
@@ -110,6 +115,14 @@ async function main(): Promise<void> {
       {
         longName: 'auto-key',
         description: 'generate a per-escrow auto key; the escrow metadata is encrypted to it',
+      },
+      {
+        longName: 'auto-key-algorithm',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        requiresAlso: 'auto-key',
+        description:
+          'auto key algorithm: P-256|P-384|P-521|RSA-OAEP (default P-521; RSA uses a 4096-bit modulus)',
       },
       {
         longName: 'auto-key-output-file',
@@ -230,6 +243,11 @@ async function main(): Promise<void> {
     vaultDir: opt.value('vault-directory') as string,
     ...(escrowKey !== undefined ? { escrowKey } : {}),
     ...(autoKey ? { autoKey: true } : {}),
+    // Value validation is the library's; an RSA-OAEP auto key uses the
+    // library-default 4096-bit modulus (not configurable in the CLI).
+    ...(opt.value('auto-key-algorithm') !== undefined
+      ? { autoKeyAlgorithm: opt.value('auto-key-algorithm') as AutoKeyAlgorithm }
+      : {}),
   });
 
   const op = await esc.createEscrow(escrowOptions);

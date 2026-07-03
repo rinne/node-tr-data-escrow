@@ -301,6 +301,60 @@ describe('escrow CLI', () => {
       void secretKey; // escrow-key recovery is covered by the decrypt-cli tests
     });
 
+    it('--auto-key-algorithm selects the curve; RSA-OAEP uses a 4096-bit modulus', async () => {
+      const vaultDir = makeVaultDir();
+      for (const [algorithm, check] of [
+        ['P-256', (k: Record<string, unknown>) => k.kty === 'EC' && k.crv === 'P-256'],
+        [
+          'RSA-OAEP',
+          (k: Record<string, unknown>) =>
+            k.kty === 'RSA' &&
+            k.alg === 'RSA-OAEP' &&
+            Buffer.from(k.n as string, 'base64url').length === 4096 / 8,
+        ],
+      ] as const) {
+        const outFile = join(vaultDir, `auto-secret-${algorithm}.json`);
+        const r = await runCli([
+          `--vault-directory=${vaultDir}`,
+          '--auto-key',
+          `--auto-key-algorithm=${algorithm}`,
+          `--auto-key-output-file=${outFile}`,
+          '--data=1',
+        ]);
+        expect(r.stderr).toBe('');
+        expect(r.code).toBe(0);
+        const autoSecret = JSON.parse(readFileSync(outFile, 'utf8')) as Record<string, unknown>;
+        expect(check(autoSecret)).toBe(true);
+        expect(
+          openEscrow(escrowDir(vaultDir, r.stdout.trim()), autoSecret).data.map((d) => d.data),
+        ).toEqual([1]);
+      }
+    });
+
+    it('rejects an invalid --auto-key-algorithm and requires --auto-key for it', async () => {
+      const vaultDir = makeVaultDir();
+      const { keyFile } = makeKeyFile(vaultDir);
+      const outFile = join(vaultDir, 'auto-secret.json');
+      // library-level value validation surfaces as a CLI error
+      let r = await runCli([
+        `--vault-directory=${vaultDir}`,
+        '--auto-key',
+        '--auto-key-algorithm=P-192',
+        `--auto-key-output-file=${outFile}`,
+        '--data=1',
+      ]);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain('autoKeyAlgorithm');
+      // optist requiresAlso: the option is meaningless without --auto-key
+      r = await runCli([
+        `--escrow-key-file=${keyFile}`,
+        `--vault-directory=${vaultDir}`,
+        '--auto-key-algorithm=P-256',
+        '--data=1',
+      ]);
+      expect(r.code).not.toBe(0);
+    });
+
     it('the output file is optional when an escrow key is present', async () => {
       const vaultDir = makeVaultDir();
       const { keyFile } = makeKeyFile(vaultDir);
