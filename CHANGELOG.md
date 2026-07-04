@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-07-04
+
+Optional integration with a [tr-key-vault](https://github.com/rinne/tr-key-vault)
+key-vault server, plus an auto-key algorithm cleanup. Key-vault use is fully
+optional and invisible when unused. **Existing escrows written by 2.x decrypt
+unchanged**; the breaking changes are confined to the writer/CLI option surface
+for creating new escrows.
+
+### Added
+
+- **`kvKey`** layer (mutually exclusive with `autoKey`): the per-escrow key is
+  generated in a key-vault server, the metadata is encrypted to its public
+  half, the private half never leaves the vault, and the escrow's expiry is
+  **enforced** by the vault (the key is deleted at expiry — hands-off
+  expiration). New options `kvKey`, `kvKeyAlgorithm`, `kvKeyCrv`, `kvKeyLength`,
+  and `kv` (a connection config or a `KeyVaultClient` instance), on the
+  constructor and per operation.
+  - `DataEscrow` marks such escrows with `metadata.kv = { url }` and best-effort
+    revokes the vault key if an operation is abandoned or fails before commit.
+  - `DataEscrowDecrypt` accepts an optional `kv` connection (constructor and per
+    `decrypt()` call) and recovers kv-backed escrows through the vault; the
+    escrow secret key becomes optional (a key-vault-only reader).
+  - `escrow` / `decrypt-escrow` CLIs gain `--kv-key` and `--kv-url` /
+    `--kv-user` / `--kv-token` / `--kv-token-file` (with `OPT_KV_*` fallbacks).
+  - `tr-key-vault-client` is a new dependency, loaded lazily — code that never
+    uses `kvKey` never pulls it in.
+- Escrow keys and auto keys may now use `RSA-OAEP-256`.
+- Auto keys gain a separate `autoKeyCrv` (EC curve).
+
+### Changed (breaking)
+
+- **`autoKeyAlgorithm`** values are now `ECDH-ES` (default) | `RSA-OAEP` |
+  `RSA-OAEP-256`. The curve is no longer an algorithm value: use `autoKeyCrv`
+  (`P-256`/`P-384`/`P-521`, default `P-521`) for `ECDH-ES`. The default auto key
+  is unchanged in substance (EC P-521 / ECDH-ES).
+- **`rsaModulusLength`** is renamed **`autoKeyLength`** (algorithm-specific
+  length).
+- CLI: `--auto-key-algorithm` takes the new value set; `--auto-key-crv` and
+  `--auto-key-length` are added. `requiresAlso` is dropped — auto-/kv- sub-
+  options given without their mode flag are now ignored (enabling env-based
+  defaults) rather than an error.
+
 ## [2.1.2] - 2026-07-03
 
 No functional changes.

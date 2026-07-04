@@ -301,23 +301,35 @@ describe('escrow CLI', () => {
       void secretKey; // escrow-key recovery is covered by the decrypt-cli tests
     });
 
-    it('--auto-key-algorithm selects the curve; RSA-OAEP uses a 4096-bit modulus', async () => {
+    it('--auto-key-algorithm/-crv/-length select the key', async () => {
       const vaultDir = makeVaultDir();
-      for (const [algorithm, check] of [
-        ['P-256', (k: Record<string, unknown>) => k.kty === 'EC' && k.crv === 'P-256'],
+      const cases: [string[], (k: Record<string, unknown>) => boolean][] = [
         [
-          'RSA-OAEP',
-          (k: Record<string, unknown>) =>
+          ['--auto-key-algorithm=ECDH-ES', '--auto-key-crv=P-256'],
+          (k) => k.kty === 'EC' && k.crv === 'P-256',
+        ],
+        [
+          ['--auto-key-algorithm=RSA-OAEP'],
+          (k) =>
             k.kty === 'RSA' &&
             k.alg === 'RSA-OAEP' &&
             Buffer.from(k.n as string, 'base64url').length === 4096 / 8,
         ],
-      ] as const) {
-        const outFile = join(vaultDir, `auto-secret-${algorithm}.json`);
+        [
+          ['--auto-key-algorithm=RSA-OAEP-256', '--auto-key-length=2048'],
+          (k) =>
+            k.kty === 'RSA' &&
+            k.alg === 'RSA-OAEP-256' &&
+            Buffer.from(k.n as string, 'base64url').length === 2048 / 8,
+        ],
+      ];
+      let i = 0;
+      for (const [args, check] of cases) {
+        const outFile = join(vaultDir, `auto-secret-${i++}.json`);
         const r = await runCli([
           `--vault-directory=${vaultDir}`,
           '--auto-key',
-          `--auto-key-algorithm=${algorithm}`,
+          ...args,
           `--auto-key-output-file=${outFile}`,
           '--data=1',
         ]);
@@ -331,7 +343,7 @@ describe('escrow CLI', () => {
       }
     });
 
-    it('rejects an invalid --auto-key-algorithm and requires --auto-key for it', async () => {
+    it('rejects an invalid --auto-key-algorithm; ignores auto sub-options without --auto-key', async () => {
       const vaultDir = makeVaultDir();
       const { keyFile } = makeKeyFile(vaultDir);
       const outFile = join(vaultDir, 'auto-secret.json');
@@ -345,14 +357,16 @@ describe('escrow CLI', () => {
       ]);
       expect(r.code).not.toBe(0);
       expect(r.stderr).toContain('autoKeyAlgorithm');
-      // optist requiresAlso: the option is meaningless without --auto-key
+      // without --auto-key, auto sub-options are ignored (not an error), so a
+      // plain escrow with the escrow key succeeds
       r = await runCli([
         `--escrow-key-file=${keyFile}`,
         `--vault-directory=${vaultDir}`,
-        '--auto-key-algorithm=P-256',
+        '--auto-key-algorithm=RSA-OAEP',
         '--data=1',
       ]);
-      expect(r.code).not.toBe(0);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
     });
 
     it('the output file is optional when an escrow key is present', async () => {
@@ -384,14 +398,17 @@ describe('escrow CLI', () => {
       expect(r.code).not.toBe(0);
       expect(r.stderr).toContain('--auto-key-output-file');
 
-      // the output file requires --auto-key (optist requiresAlso)
+      // without --auto-key, --auto-key-output-file is ignored (not an error);
+      // the escrow succeeds with the escrow key
       r = await runCli([
         `--escrow-key-file=${keyFile}`,
         `--vault-directory=${vaultDir}`,
         `--auto-key-output-file=${outFile}`,
         '--data=1',
       ]);
-      expect(r.code).not.toBe(0);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(existsSync(outFile)).toBe(false); // ignored: nothing written
     });
 
     it('refuses to overwrite an existing output file and leaves no escrow behind', async () => {

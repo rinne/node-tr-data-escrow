@@ -9,6 +9,7 @@ import { streamEncryptToFile, fsyncDir } from './vault';
 import { validateCompression, type CompressionName } from './trde';
 import { ReferenceConflictError } from './errors';
 import { serializeGuard, validateName, validateReference } from './util';
+import type { KvVault } from './kv';
 
 /** Options for {@link DataEscrowOperation.addData}. */
 export interface AddDataOptions {
@@ -57,6 +58,15 @@ export interface EscrowContext {
    * operation has an escrow key. Written out at commit.
    */
   autoKeyFile?: Record<string, unknown>;
+  /**
+   * The `metadata.kv` marker object written to the manifest for a kvKey escrow
+   * (`{ url }` when the vault URL is known, else `{}`); undefined otherwise.
+   */
+  kvMarker?: { url?: string };
+  /** The key-vault target, for best-effort revoke of an abandoned kv key. */
+  kvVault?: KvVault | null;
+  /** The kv key id to revoke if this operation never commits. */
+  kvKid?: string | null;
   /** Resolved default compression for this escrow's files. */
   fileCompression: CompressionName;
   /** `<vault>/.tmp/<escrow-id>` — already created. */
@@ -361,6 +371,7 @@ export class DataEscrowOperation {
           iat: this.#ctx.iat,
           ...(this.#ctx.exp !== undefined ? { exp: this.#ctx.exp } : {}),
           ...(this.#ctx.reference !== null ? { ref: this.#ctx.reference } : {}),
+          ...(this.#ctx.kvMarker !== undefined ? { kv: this.#ctx.kvMarker } : {}),
           payload: this.#ctx.metadataPayload,
         },
         ...(this.#dataEntries.size > 0 ? { data: entriesToManifest(this.#dataEntries) } : {}),
@@ -403,6 +414,12 @@ export class DataEscrowOperation {
     if (this.#state !== 'pending') return;
     this.#state = 'destroyed';
     finalizer.unregister(this);
+    // Best-effort revoke of an abandoned kvKey escrow's vault key. Swallowed on
+    // failure ("no sweat"): an expiring key self-cleans, a non-expiring one is
+    // a permanent orphan.
+    if (this.#ctx.kvVault && this.#ctx.kvKid) {
+      await this.#ctx.kvVault.revokeKeyBestEffort(this.#ctx.kvKid);
+    }
     await rm(this.#ctx.tmpDir, { recursive: true, force: true }).catch(() => {});
     this.#wipe();
   }
@@ -417,6 +434,10 @@ export class DataEscrowOperation {
     (this.#ctx as { metadataPayload?: unknown }).metadataPayload = undefined;
     this.#ctx.autoKeyPair = undefined;
     this.#ctx.autoKeyFile = undefined;
+    // Drop the kv references (a committed kv key stays live in the vault; an
+    // abandoned one was already revoked in #teardown before this runs).
+    this.#ctx.kvVault = null;
+    this.#ctx.kvKid = null;
   }
 }
 

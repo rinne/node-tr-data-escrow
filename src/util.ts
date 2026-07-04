@@ -3,7 +3,8 @@
  * convention: integer unix seconds.
  */
 import type { CompressionName } from './trde';
-import type { AutoKeyAlgorithm } from './auto-key';
+import type { AutoKeyAlgorithm, AutoKeyCrv } from './auto-key';
+import type { KvKeyAlgorithm, KvKeyCrv, KvOption } from './kv';
 
 /**
  * Throws `TypeError` unless `value` is JSON-serializable and not `undefined`.
@@ -128,10 +129,25 @@ export interface EscrowOptionsInput {
   escrowKey?: Record<string, unknown> | null;
   /** Enable the auto-key layer for this escrow (null/undefined: inherit). */
   autoKey?: boolean | null;
-  /** Auto key algorithm for this escrow (null/undefined: inherit). */
+  /** Auto key algorithm (ECDH-ES|RSA-OAEP|RSA-OAEP-256) (null/undefined: inherit). */
   autoKeyAlgorithm?: AutoKeyAlgorithm | null;
-  /** RSA modulus bits for an RSA-OAEP auto key (null/undefined: inherit). */
-  rsaModulusLength?: number | null;
+  /** EC curve for an ECDH-ES auto key (null/undefined: inherit). */
+  autoKeyCrv?: AutoKeyCrv | null;
+  /** RSA modulus bits for an RSA auto key (null/undefined: inherit). */
+  autoKeyLength?: number | null;
+  /** Enable the key-vault layer for this escrow (null/undefined: inherit). */
+  kvKey?: boolean | null;
+  /** Key-vault key algorithm (ECDH-ES|RSA-OAEP|RSA-OAEP-256) (null/undefined: inherit). */
+  kvKeyAlgorithm?: KvKeyAlgorithm | null;
+  /** EC curve for an ECDH-ES key-vault key (null/undefined: inherit). */
+  kvKeyCrv?: KvKeyCrv | null;
+  /** RSA modulus bits for an RSA key-vault key (null/undefined: inherit). */
+  kvKeyLength?: number | null;
+  /**
+   * Key-vault connection for this operation (null/undefined: inherit the
+   * constructor's): a connection config or a `KeyVaultClient` instance.
+   */
+  kv?: KvOption;
 }
 
 /**

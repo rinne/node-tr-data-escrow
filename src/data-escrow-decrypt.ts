@@ -8,18 +8,34 @@ import {
   type DecryptedItem,
   type DecryptedManifest,
 } from './data-escrow-decrypt-operation';
+import {
+  validateKvReaderOption,
+  readerKvVault,
+  type KvReaderConnection,
+  type KvReaderOption,
+} from './kv';
 
 /** Construction options for {@link DataEscrowDecrypt}. */
 export interface DataEscrowDecryptOptions {
   /**
-   * One escrow **secret** JWK or a non-empty array of them, each with a
-   * unique non-empty `kid` (escrows select their key by kid). Accepted forms
-   * mirror the writer's public-key rules plus the private member:
+   * One escrow **secret** JWK or a non-empty array of them, each with a unique
+   * non-empty `kid` (escrows select their key by kid). Optional when `kv` is
+   * given (a key-vault-only reader). Accepted forms mirror the writer's
+   * public-key rules plus the private member:
    *   - RSA: `{ kty:'RSA', kid, n, e, d, ... }`, modulus >= 2048 bits,
-   *     `alg` (when present) must be `"RSA-OAEP"`
+   *     `alg` (when present) `"RSA-OAEP"` or `"RSA-OAEP-256"`
    *   - EC:  `{ kty:'EC', crv:'P-256'|'P-384'|'P-521', kid, x, y, d }`
    */
-  escrowSecretKey: Record<string, unknown> | Record<string, unknown>[];
+  escrowSecretKey?: Record<string, unknown> | Record<string, unknown>[];
+  /**
+   * Key-vault connection used to recover kvKey escrows (those whose manifest
+   * carries `metadata.kv`): a connection config
+   * (`{ url?, user?, token?, timeout?, insecure?, ca? }`; `url` may be omitted
+   * and taken from the manifest) or an already-built `KeyVaultClient`.
+   * Overridable per `decrypt()` call. `tr-key-vault-client` loads lazily on
+   * first actual use.
+   */
+  kv?: KvReaderOption;
 }
 
 const EC_CURVES = ['P-256', 'P-384', 'P-521'];
@@ -37,8 +53,10 @@ function validateEscrowSecretKey(key: unknown): { kid: string; jwk: Record<strin
     throw new TypeError('escrowSecretKey must be a private key (missing "d")');
   }
   if (k.kty === 'RSA') {
-    if (k.alg !== undefined && k.alg !== 'RSA-OAEP') {
-      throw new TypeError('RSA escrowSecretKey alg, when present, must be "RSA-OAEP"');
+    if (k.alg !== undefined && k.alg !== 'RSA-OAEP' && k.alg !== 'RSA-OAEP-256') {
+      throw new TypeError(
+        'RSA escrowSecretKey alg, when present, must be "RSA-OAEP" or "RSA-OAEP-256"',
+      );
     }
     if (typeof k.n !== 'string' || typeof k.e !== 'string') {
       throw new TypeError('RSA escrowSecretKey must have string "n" and "e"');
@@ -147,16 +165,27 @@ function derivePublicJwk(secret: Record<string, unknown>): Record<string, unknow
   throw new EscrowIntegrityError('autoKey.key.kty', 'unsupported auto key type');
 }
 
-/** `decrypt`'s options are reserved: an object with no (known) keys yet. */
-function validateDecryptOptions(options: unknown): void {
-  if (options === undefined) return;
+/**
+ * Validates `decrypt`'s options. The only supported key is `kv` (a per-call
+ * key-vault connection override); unknown keys are rejected so a future option
+ * is never silently ignored by an older version. Returns the raw kv override:
+ * `undefined` when not provided (inherit the constructor), else the validated
+ * value (possibly null).
+ */
+type RawKv = ReturnType<typeof validateKvReaderOption>;
+
+function validateDecryptOptions(options: unknown): RawKv | undefined {
+  if (options === undefined) return undefined;
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('decrypt options must be an object');
   }
   const keys = Object.keys(options);
-  if (keys.length > 0) {
-    throw new TypeError(`unknown decrypt option(s): ${keys.join(', ')}`);
+  const unknown = keys.filter((k) => k !== 'kv');
+  if (unknown.length > 0) {
+    throw new TypeError(`unknown decrypt option(s): ${unknown.join(', ')}`);
   }
+  if (!('kv' in options)) return undefined;
+  return validateKvReaderOption((options as { kv: unknown }).kv);
 }
 
 interface ManifestEntryShape {
@@ -171,6 +200,7 @@ interface ManifestShape {
     iat?: unknown;
     exp?: unknown;
     ref?: unknown;
+    kv?: { url?: string };
     payload: string;
   };
   data?: Record<string, ManifestEntryShape>;
@@ -192,6 +222,15 @@ function validateManifestShape(escrow: unknown): ManifestShape {
   }
   if (typeof m.payload !== 'string' || m.payload.length === 0) {
     throw new TypeError('escrow.metadata.payload must be a non-empty string');
+  }
+  if (m.kv !== undefined) {
+    if (!m.kv || typeof m.kv !== 'object' || Array.isArray(m.kv)) {
+      throw new TypeError('escrow.metadata.kv must be an object when present');
+    }
+    const url = (m.kv as Record<string, unknown>).url;
+    if (url !== undefined && (typeof url !== 'string' || url.length === 0)) {
+      throw new TypeError('escrow.metadata.kv.url must be a non-empty string when present');
+    }
   }
   for (const section of ['data', 'file'] as const) {
     const map = e[section];
@@ -243,29 +282,40 @@ function verifyBinding(field: string, sealed: unknown, clear: unknown): void {
 export class DataEscrowDecrypt {
   /** Secret keys indexed by kid; null once destroyed. */
   #keys: Map<string, Record<string, unknown>> | null;
+  /** The constructor's raw key-vault connection (or null), for kvKey escrows. */
+  #kvReader: KvReaderConnection | ReturnType<typeof validateKvReaderOption> | null;
 
   /**
-   * @param options see {@link DataEscrowDecryptOptions}. Synchronous, no I/O;
-   *                throws `TypeError` on invalid configuration.
+   * @param options see {@link DataEscrowDecryptOptions}. Synchronous, no I/O
+   *                (the key-vault client, if any, is built lazily); throws
+   *                `TypeError` on invalid configuration.
    */
   constructor(options: DataEscrowDecryptOptions) {
     if (!options || typeof options !== 'object') {
-      throw new TypeError('options object with escrowSecretKey is required');
+      throw new TypeError('options object with escrowSecretKey and/or kv is required');
     }
-    const raw = options.escrowSecretKey;
-    const list = Array.isArray(raw) ? raw : [raw];
-    if (list.length === 0) {
-      throw new TypeError('escrowSecretKey array must not be empty');
-    }
+    const kvReader = validateKvReaderOption(options.kv);
     const keys = new Map<string, Record<string, unknown>>();
-    for (const key of list) {
-      const { kid, jwk } = validateEscrowSecretKey(key);
-      if (keys.has(kid)) {
-        throw new TypeError(`duplicate escrowSecretKey kid ${JSON.stringify(kid)}`);
+    if (options.escrowSecretKey !== undefined) {
+      const list = Array.isArray(options.escrowSecretKey)
+        ? options.escrowSecretKey
+        : [options.escrowSecretKey];
+      if (list.length === 0) {
+        throw new TypeError('escrowSecretKey array must not be empty');
       }
-      keys.set(kid, jwk);
+      for (const key of list) {
+        const { kid, jwk } = validateEscrowSecretKey(key);
+        if (keys.has(kid)) {
+          throw new TypeError(`duplicate escrowSecretKey kid ${JSON.stringify(kid)}`);
+        }
+        keys.set(kid, jwk);
+      }
+    }
+    if (keys.size === 0 && kvReader === null) {
+      throw new TypeError('at least one of escrowSecretKey or kv is required');
     }
     this.#keys = keys;
+    this.#kvReader = kvReader;
   }
 
   /**
@@ -284,31 +334,50 @@ export class DataEscrowDecrypt {
    */
   async decrypt(
     escrowObject: unknown,
-    options?: Record<string, never>,
+    options?: { kv?: KvReaderOption },
   ): Promise<DataEscrowDecryptOperation> {
     if (this.#keys === null) {
       throw new TypeError('DataEscrowDecrypt instance is destroyed');
     }
-    validateDecryptOptions(options);
+    const kvOverride = validateDecryptOptions(options);
     const shape = validateManifestShape(escrowObject);
-    const secretKey = this.#keys.get(shape.metadata.kid);
-    if (secretKey === undefined) {
-      throw new UnknownEscrowKeyError(shape.metadata.kid);
-    }
 
     const original = structuredClone(escrowObject) as Record<string, unknown>;
     const augmented = structuredClone(escrowObject) as unknown as DecryptedManifest;
 
     let metaClaims: Record<string, unknown>;
-    let metaCek: Record<string, unknown>;
-    try {
-      metaClaims = asClaimsObject(jweDecrypt(shape.metadata.payload, secretKey));
-      metaCek = jweUnwrap(shape.metadata.payload, secretKey);
-    } catch (err) {
-      throw new Error('failed to decrypt escrow metadata payload', { cause: err });
+    let metaCek: Record<string, unknown> | undefined;
+    if (shape.metadata.kv !== undefined) {
+      // Key-vault escrow: the private key lives only in the vault, so the
+      // metadata payload is unwrapped by the vault (its CEK is not exposed, so
+      // there is no metadata payloadContentKey). The wrapping key comes back in
+      // the claims; everything else decrypts locally, exactly as usual.
+      const rawKv = kvOverride !== undefined ? kvOverride : this.#kvReader;
+      if (rawKv === null || rawKv === undefined) {
+        throw new Error(
+          'this escrow is key-vault-backed (metadata.kv present); configure `kv` ' +
+            '(or --kv-*) to recover it',
+        );
+      }
+      const vault = readerKvVault(rawKv, shape.metadata.kv.url);
+      metaClaims = await vault.decryptJwe(shape.metadata.payload, shape.metadata.kid);
+      metaCek = undefined;
+    } else {
+      const secretKey = this.#keys.get(shape.metadata.kid);
+      if (secretKey === undefined) {
+        throw new UnknownEscrowKeyError(shape.metadata.kid);
+      }
+      try {
+        metaClaims = asClaimsObject(jweDecrypt(shape.metadata.payload, secretKey));
+        metaCek = jweUnwrap(shape.metadata.payload, secretKey);
+      } catch (err) {
+        throw new Error('failed to decrypt escrow metadata payload', { cause: err });
+      }
     }
     augmented.metadata.payloadData = metaClaims;
-    augmented.metadata.payloadContentKey = metaCek;
+    if (metaCek !== undefined) {
+      augmented.metadata.payloadContentKey = metaCek;
+    }
 
     // Sealed metadata claims must match their cleartext duplicates, absence
     // included (the sealed cref has no cleartext counterpart by design).
@@ -414,6 +483,7 @@ export class DataEscrowDecrypt {
   destroy(): void {
     this.#keys?.clear();
     this.#keys = null;
+    this.#kvReader = null;
   }
 }
 

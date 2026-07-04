@@ -48,10 +48,37 @@ async function main(): Promise<void> {
       {
         longName: 'escrow-secret-key-file',
         hasArg: true,
-        required: true,
         optArgCb: existingFileCb,
         environment: 'OPT_ESCROW_SECRET_KEY_FILE',
-        description: 'JSON file containing the escrow secret key (JWK, or an array of them)',
+        description:
+          'JSON file with the escrow secret key (JWK, or an array); ' +
+          'required unless a key vault (--kv-*) is configured',
+      },
+      {
+        longName: 'kv-url',
+        hasArg: true,
+        environment: 'OPT_KV_URL',
+        description: 'key vault base URL (optional; taken from the manifest when omitted)',
+      },
+      {
+        longName: 'kv-user',
+        hasArg: true,
+        environment: 'OPT_KV_USER',
+        description: 'key vault user id (UUID), for recovering key-vault-backed escrows',
+      },
+      {
+        longName: 'kv-token',
+        hasArg: true,
+        conflictsWith: 'kv-token-file',
+        environment: 'OPT_KV_TOKEN',
+        description: 'key vault token (UUID); prefer --kv-token-file or OPT_KV_TOKEN over argv',
+      },
+      {
+        longName: 'kv-token-file',
+        hasArg: true,
+        optArgCb: existingFileCb,
+        environment: 'OPT_KV_TOKEN_FILE',
+        description: 'read the key vault token from a file',
       },
     ])
     .help('decrypt-escrow [ <source-directory> [ <destination-directory> ] ]')
@@ -62,15 +89,46 @@ async function main(): Promise<void> {
   const srcDir = resolve(rest[0] ?? '.');
   const destDir = resolve(rest[1] ?? srcDir);
 
-  // --- escrow secret key ---
-  const keyFile = opt.value('escrow-secret-key-file') as string;
-  let escrowSecretKey: Record<string, unknown> | Record<string, unknown>[];
-  try {
-    escrowSecretKey = JSON.parse(readFileSync(keyFile, 'utf8'));
-  } catch (err) {
-    fail(`cannot read escrow secret key from ${JSON.stringify(keyFile)}: ${(err as Error).message}`);
+  // --- key vault connection (optional; recovers kvKey escrows) ---
+  const kvUrl = opt.value('kv-url') as string | undefined;
+  const kvUser = opt.value('kv-user') as string | undefined;
+  const kvTokenFile = opt.value('kv-token-file') as string | undefined;
+  let kvToken = opt.value('kv-token') as string | undefined;
+  if (kvToken === undefined && kvTokenFile !== undefined) {
+    try {
+      kvToken = readFileSync(kvTokenFile, 'utf8').trim();
+    } catch (err) {
+      fail(`cannot read key vault token from ${JSON.stringify(kvTokenFile)}: ${(err as Error).message}`);
+    }
   }
-  const dec = new DataEscrowDecrypt({ escrowSecretKey });
+  const kvConfigured = kvUrl !== undefined || kvUser !== undefined || kvToken !== undefined;
+  let kv: { url?: string; user: string; token: string } | undefined;
+  if (kvConfigured) {
+    if (kvUser === undefined) fail('a key vault connection requires --kv-user (or OPT_KV_USER)');
+    if (kvToken === undefined) {
+      fail('a key vault connection requires --kv-token / --kv-token-file (or OPT_KV_TOKEN)');
+    }
+    // url may be omitted here: the manifest's metadata.kv.url fills it in.
+    kv = { ...(kvUrl !== undefined ? { url: kvUrl } : {}), user: kvUser, token: kvToken };
+  }
+
+  // --- escrow secret key (required unless a key vault is configured) ---
+  const keyFile = opt.value('escrow-secret-key-file') as string | undefined;
+  if (keyFile === undefined && !kvConfigured) {
+    fail('one of --escrow-secret-key-file or a key vault (--kv-user/--kv-token[-file]) is required');
+  }
+  let escrowSecretKey: Record<string, unknown> | Record<string, unknown>[] | undefined;
+  if (keyFile !== undefined) {
+    try {
+      escrowSecretKey = JSON.parse(readFileSync(keyFile, 'utf8'));
+    } catch (err) {
+      fail(`cannot read escrow secret key from ${JSON.stringify(keyFile)}: ${(err as Error).message}`);
+    }
+  }
+  const dec = new DataEscrowDecrypt({
+    ...(escrowSecretKey !== undefined ? { escrowSecretKey } : {}),
+    ...(kv !== undefined ? { kv } : {}),
+  });
 
   // --- source directory ---
   requireDirectory(srcDir, 'source directory');

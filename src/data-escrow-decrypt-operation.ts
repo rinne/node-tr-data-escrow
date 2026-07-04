@@ -17,7 +17,13 @@ import {
 export interface DecryptedPayload {
   payload: string;
   payloadData: Record<string, unknown>;
-  payloadContentKey: Record<string, unknown>;
+  /**
+   * The JWE content-encryption key that opened `payload`. Present for locally
+   * decrypted payloads; **absent for a kvKey escrow's `metadata`**, whose CEK
+   * is not exposed by the vault (data/file items still carry it — they are
+   * decrypted locally with the wrapping key).
+   */
+  payloadContentKey?: Record<string, unknown>;
 }
 
 /** An augmented `data`/`file` manifest entry. */

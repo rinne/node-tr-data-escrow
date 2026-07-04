@@ -230,7 +230,7 @@ describe('decrypt-escrow CLI', () => {
         vaultDir,
         escrowKey: publicKey,
         autoKey: true,
-        autoKeyAlgorithm: 'P-256',
+        autoKeyCrv: 'P-256',
       });
       const op = await esc.createEscrow({ reference: 'auto-restore' });
       const autoSecretFile = join(workDir, 'auto-secret.json');
@@ -317,7 +317,7 @@ describe('decrypt-escrow CLI', () => {
     it('auto key not stored in the escrow: only the auto secret key restores it', async () => {
       const workDir = makeVaultDir();
       const vaultDir = join(workDir, 'vault');
-      const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+      const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyCrv: 'P-256' });
       const op = await esc.createEscrow();
       const autoSecretFile = join(workDir, 'auto-secret.json');
       writeFileSync(autoSecretFile, JSON.stringify(op.autoKeyPair().secretKey));

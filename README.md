@@ -26,9 +26,14 @@ similar.
   themselves.
 - **Streams, not memory.** File bytes are encrypted with a fresh per-file
   AES-256-GCM key and streamed to disk; they never sit in memory.
-- **No database, no services.** The only dependencies are
-  [`tr-jwe`](https://www.npmjs.com/package/tr-jwe) and
-  [`tr-jwk`](https://www.npmjs.com/package/tr-jwk).
+- **Per-escrow keys, optionally.** Generate a fresh key per escrow locally
+  ([auto key](#auto-key)) or in a [key vault](#key-vault) — the latter enforces
+  a hard, hands-off expiry (the key is deleted at expiry). Both are off by
+  default; when unused, nothing changes.
+- **No database, no services** for the core. Runtime dependency:
+  [`tr-jwe`](https://www.npmjs.com/package/tr-jwe); the optional key-vault layer
+  adds [`tr-key-vault-client`](https://www.npmjs.com/package/tr-key-vault-client),
+  loaded lazily only when used.
 
 > **Scope.** The main entry point is deliberately **write-only**: it has no
 > read, restore, delete, or expiry-enforcement API, and it loads zero
@@ -111,11 +116,21 @@ escrow --escrow-key-file=./escrow-key.json --vault-directory=/escrow/vault \
 
 | Option | Meaning |
 |--------|---------|
-| `--escrow-key-file=<file>` | **Required unless `--auto-key` is given.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
+| `--escrow-key-file=<file>` | **Required unless `--auto-key` or `--kv-key` is given.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
 | `--vault-directory=<dir>` | **Required.** The vault directory. Env fallback: `OPT_VAULT_DIRECTORY`. |
-| `--auto-key` | Generate a per-escrow [auto key](#auto-key). |
-| `--auto-key-algorithm=<alg>` | `P-256`, `P-384`, `P-521` (default), or `RSA-OAEP` (always a 4096-bit modulus). Requires `--auto-key`. |
-| `--auto-key-output-file=<file>` | Write the generated auto key **private JWK** here (mode 0600; the path must not exist) — usable directly as `decrypt-escrow`'s secret key file. Requires `--auto-key`; **required** when `--auto-key` is given without `--escrow-key-file`. |
+| `--auto-key` | Generate a per-escrow [auto key](#auto-key). Conflicts with `--kv-key`. |
+| `--auto-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, or `RSA-OAEP-256`. Env: `OPT_AUTO_KEY_ALGORITHM`. |
+| `--auto-key-crv=<crv>` | EC curve for `ECDH-ES`: `P-256`, `P-384`, `P-521` (default). Env: `OPT_AUTO_KEY_CRV`. |
+| `--auto-key-length=<bits>` | RSA modulus length (default 4096; ignored for `ECDH-ES`). Env: `OPT_AUTO_KEY_LENGTH`. |
+| `--auto-key-output-file=<file>` | Write the generated auto key **private JWK** here (mode 0600; the path must not exist) — usable directly as `decrypt-escrow`'s secret key file. **Required** when `--auto-key` is given without `--escrow-key-file`. |
+| `--kv-key` | Generate the per-escrow key in a [key vault](#key-vault); the metadata is encrypted to it and the expiry is enforced by the vault (the key is deleted at expiry). Conflicts with `--auto-key`. |
+| `--kv-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, or `RSA-OAEP-256`. Env: `OPT_KV_KEY_ALGORITHM`. |
+| `--kv-key-crv=<crv>` | EC curve for `ECDH-ES`: `P-256`, `P-384`, `P-521` (default). Env: `OPT_KV_KEY_CRV`. |
+| `--kv-key-length=<bits>` | RSA modulus length (default 4096; ignored for `ECDH-ES`). Env: `OPT_KV_KEY_LENGTH`. |
+| `--kv-url=<url>` | Key vault base URL. Env: `OPT_KV_URL`. |
+| `--kv-user=<uuid>` | Key vault user id. Env: `OPT_KV_USER`. |
+| `--kv-token=<uuid>` | Key vault token (mutually exclusive with `--kv-token-file`). Env: `OPT_KV_TOKEN`. |
+| `--kv-token-file=<file>` | Read the key vault token from a file. Env: `OPT_KV_TOKEN_FILE`. |
 | `--reference=<string>` | Cleartext escrow reference. |
 | `--encrypted-reference=<string>` | Sealed escrow reference. |
 | `--expires-at=<timestamp>` | Absolute advisory expiry (ISO-8601 or `YYYY-MM-DD HH:MM:SS` local time). Conflicts with `--expires-after`. |
@@ -125,7 +140,17 @@ escrow --escrow-key-file=./escrow-key.json --vault-directory=/escrow/vault \
 | `--file=<path-or-json>` | A file to escrow. Repeatable. Either a plain path (stored under its basename), or a JSON object for per-file options: `{"filename": <path>, "name"?, "reference"?, "encryptedReference"?, "compression"?}`. An argument starting with `{` is taken as JSON. |
 
 At least one `--data` or `--file` is required. The two mandatory options may be
-supplied via the environment instead of the command line.
+supplied via the environment instead of the command line. Auto-key and key-vault
+sub-options given **without** their mode flag (`--auto-key` / `--kv-key`) are
+ignored, so defaults can be set via the environment and take effect only when
+the mode is on.
+
+```sh
+# Per-escrow key generated (and auto-expired) in a key vault
+escrow --vault-directory=/escrow/vault --kv-key \
+           --kv-url=https://kv.example.com/ --kv-user=<uuid> --kv-token-file=./kv-token \
+           --expires-after=90d --data='{ "case": 7 }'
+```
 
 ```sh
 # global gzip, but ship the already-compressed video uncompressed under a new name
@@ -250,11 +275,17 @@ write-testing `<vaultDir>/.tmp` (throws on failure).
 | Option         | Type             | Default | Meaning |
 |----------------|------------------|---------|---------|
 | `vaultDir`     | `string`         | —       | **Required.** The vault directory. |
-| `escrowKey`    | JWK (public) `\| null` | —  | **Required unless `autoKey` is `true`.** See [Escrow keys](#escrow-keys). |
-| `autoKey`      | `boolean \| null` | `false` | Enable the per-escrow [auto key](#auto-key) layer. |
-| `autoKeyAlgorithm` | `'P-256' \| 'P-384' \| 'P-521' \| 'RSA-OAEP' \| null` | `'P-521'` | Auto key algorithm. Validated even when unused. |
-| `rsaModulusLength` | `number \| null` | `4096` | Modulus bits for `'RSA-OAEP'` auto keys: an integer, 2048–16384. Validated even when unused. |
-| `expiresAfter` | `number \| null` | none    | Default advisory expiry in **seconds** after creation, for escrows that don't set their own. Finite, `≥ 0`. (`expiresAt` is not a constructor option.) |
+| `escrowKey`    | JWK (public) `\| null` | —  | **Required unless `autoKey` or `kvKey` is `true`.** See [Escrow keys](#escrow-keys). |
+| `autoKey`      | `boolean \| null` | `false` | Enable the per-escrow [auto key](#auto-key) layer. Mutually exclusive with `kvKey`. |
+| `autoKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| null` | `'ECDH-ES'` | Auto key algorithm. Validated even when unused. |
+| `autoKeyCrv`   | `'P-256' \| 'P-384' \| 'P-521' \| null` | `'P-521'` | EC curve for an `ECDH-ES` auto key. |
+| `autoKeyLength` | `number \| null` | `4096` | Modulus bits for RSA auto keys: an integer, 2048–16384. |
+| `kvKey`        | `boolean \| null` | `false` | Generate the per-escrow key in a [key vault](#key-vault). Mutually exclusive with `autoKey`. |
+| `kvKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| null` | `'ECDH-ES'` | Key-vault key algorithm. |
+| `kvKeyCrv`     | `'P-256' \| 'P-384' \| 'P-521' \| null` | `'P-521'` | EC curve for an `ECDH-ES` key-vault key. |
+| `kvKeyLength`  | `number \| null` | `4096` | Modulus bits for RSA key-vault keys. |
+| `kv`           | connection `\| KeyVaultClient \| null` | — | Key-vault connection: `{ url, user?, token?, timeout?, insecure?, ca? }` or a `tr-key-vault-client` instance. Required (here or per operation) when `kvKey` is on. |
+| `expiresAfter` | `number \| null` | none    | Default expiry in **seconds** after creation, for escrows that don't set their own. Finite, `≥ 0`. Advisory for plain/auto escrows; **enforced by the vault** for kvKey escrows. (`expiresAt` is not a constructor option.) |
 | `compression`  | `'none' \| 'deflate' \| 'gzip' \| 'brotli'` | `'none'` | Default compression for file content (before encryption). `'zstd'` is a reserved container code and rejected for now. |
 
 ### `escrow(data, options?): Promise<string>`
@@ -280,10 +311,11 @@ Per-escrow options (also accepted by `escrow()`):
 | `expiresAt`          | `Date \| string \| null` | Absolute advisory expiry (`Date` or ISO-8601 string). `null` = no expiry (overrides the constructor default). |
 | `expiresAfter`       | `number \| null`         | Relative advisory expiry, **seconds** after creation. `null` = no expiry (overrides the constructor default). |
 | `compression`        | `'none' \| 'deflate' \| 'gzip' \| 'brotli'` | Default file compression for this escrow, overriding the constructor default. |
-| `escrowKey`          | JWK (public) `\| null`   | Escrow key for this operation only. Absent/`undefined`: inherit the constructor key. **`null`: no escrow key** — requires effective `autoKey`. |
-| `autoKey`            | `boolean \| null`        | [Auto key](#auto-key) for this escrow (`null`/absent: inherit). |
-| `autoKeyAlgorithm`   | see constructor          | Auto key algorithm for this escrow (`null`/absent: inherit). |
-| `rsaModulusLength`   | `number \| null`         | RSA modulus bits for this escrow's auto key (`null`/absent: inherit). |
+| `escrowKey`          | JWK (public) `\| null`   | Escrow key for this operation only. Absent/`undefined`: inherit the constructor key. **`null`: no escrow key** — requires effective `autoKey` or `kvKey`. |
+| `autoKey`            | `boolean \| null`        | [Auto key](#auto-key) for this escrow (`null`/absent: inherit; `false`: off). |
+| `autoKeyAlgorithm` / `autoKeyCrv` / `autoKeyLength` | see constructor | Auto key parameters for this escrow (`null`/absent: inherit). |
+| `kvKey`              | `boolean \| null`        | [Key vault](#key-vault) for this escrow (`null`/absent: inherit; `false`: off). To switch an inherited `autoKey:true` to the vault, pass `{ autoKey: false, kvKey: true }`. |
+| `kvKeyAlgorithm` / `kvKeyCrv` / `kvKeyLength` / `kv` | see constructor | Key-vault parameters and connection for this escrow (`null`/absent: inherit). |
 
 Supplying both `expiresAt` and `expiresAfter` throws `TypeError`. Expiry is
 advisory: stored in the manifest (and sealed into the metadata payload), never
@@ -319,8 +351,8 @@ strings, ≤ 1024 chars.
 
 The `escrowKey` must be a **public** JWK carrying a non-empty `kid`, one of:
 
-- **RSA-OAEP** — `{ kty: 'RSA', alg: 'RSA-OAEP', kid, n, e }`, modulus **≥ 2048
-  bits**. Sealed with `RSA-OAEP`.
+- **RSA** — `{ kty: 'RSA', alg: 'RSA-OAEP' | 'RSA-OAEP-256', kid, n, e }`,
+  modulus **≥ 2048 bits**. Sealed with that algorithm.
 - **EC** — `{ kty: 'EC', crv: 'P-256' | 'P-384' | 'P-521', kid, x, y }`. Sealed
   with `ECDH-ES`.
 
@@ -337,11 +369,13 @@ prefix is reserved for [auto keys](#auto-key) and rejected here.
 
 An optional second key layer, default off — when unused, nothing changes.
 With `autoKey` enabled (constructor default or per operation), `createEscrow`
-generates a fresh **auto key pair** for that one escrow (algorithm per
-`autoKeyAlgorithm`; kid `auto:<uuid>`), and the manifest's metadata payload is
-encrypted to its public half instead of the escrow key — `metadata.kid`
-becomes the auto kid. Key pairs are generated asynchronously (never blocking
-the event loop, though RSA at large moduli still takes real time).
+generates a fresh **auto key pair** for that one escrow (`autoKeyAlgorithm`
+`ECDH-ES` on `autoKeyCrv`, or `RSA-OAEP`/`RSA-OAEP-256` of `autoKeyLength`
+bits; kid `auto:<uuid>`), and the manifest's metadata payload is encrypted to
+its public half instead of the escrow key — `metadata.kid` becomes the auto
+kid. Key pairs are generated asynchronously (never blocking the event loop,
+though RSA at large moduli still takes real time). `autoKey` and `kvKey` are
+mutually exclusive.
 
 The auto **private** key has two recovery paths, usable together:
 
@@ -368,6 +402,47 @@ With an escrow key present the escrow stays recoverable through either path.
 Without one (`escrowKey: null` per operation, or an autoKey-only
 constructor), the auto key is the **only** path — so `commit()` refuses,
 without destroying the operation, until `autoKeyPair()` has been called.
+
+## Key vault
+
+An alternative to `autoKey`, default off and mutually exclusive with it. With
+`kvKey` enabled, `createEscrow` asks a
+[tr-key-vault](https://github.com/rinne/tr-key-vault) server (the `kv`
+connection) to generate the per-escrow key; the vault returns only the public
+half and keeps the private half. The metadata is encrypted to that public key,
+`metadata.kid` is the vault's key id, and the manifest records `metadata.kv =
+{ url }`. **The private key never touches this process** — recovery goes back
+through the vault.
+
+```js
+const kc = { url: 'https://kv.example.com/', user: '<uuid>', token: '<uuid>' };
+const esc = new DataEscrow({ vaultDir, kvKey: true, kv: kc });
+const id = await esc.escrow({ case: 7 }, { expiresAfter: 90 * 86400 });
+// recover later:
+const dec = new DataEscrowDecrypt({ kv: kc });
+const opened = await dec.decrypt(JSON.parse(readFileSync(join(dir, 'escrow.json'), 'utf8')));
+```
+
+- **Hands-off expiry.** The escrow's `exp` is handed to the vault as a hard
+  deletion deadline — the vault deletes the key at expiry, after which the
+  escrow is permanently unrecoverable. Set an expiry with `expiresAfter` /
+  `expiresAt`; with none, the vault key is non-expiring. A past/now expiry is
+  rejected. (For plain and auto escrows `exp` stays purely advisory.)
+- **No local custody dance.** The vault is the custody, so there is no
+  `autoKeyPair()` collection and no `auto-key.json`; one-shot `escrow()` works
+  with `kvKey` and no escrow key.
+- **Recovery.** `DataEscrowDecrypt` takes an optional `kv` connection
+  (constructor or per `decrypt()` call). For a kv-backed escrow it unwraps the
+  metadata via the vault, then decrypts everything else locally. The reader's
+  `url` overrides the manifest's; `user`/`token` always come from the reader.
+  `decrypt-escrow` gains matching `--kv-url` / `--kv-user` / `--kv-token[-file]`
+  (with `OPT_KV_*` fallbacks; `--kv-url` optional, taken from the manifest).
+- **Abandon cleanup.** If an operation is destroyed or fails before commit, its
+  vault key is revoked best-effort.
+- **The `kv` connection** is `{ url, user?, token?, timeout?, insecure?, ca? }`
+  or a `tr-key-vault-client` `KeyVaultClient` instance; it is overridable per
+  operation. `tr-key-vault-client` is a dependency but is **loaded lazily** —
+  code that never uses `kvKey` never pulls it in.
 
 ## Failure handling
 

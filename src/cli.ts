@@ -114,24 +114,95 @@ async function main(): Promise<void> {
       },
       {
         longName: 'auto-key',
+        conflictsWith: 'kv-key',
         description: 'generate a per-escrow auto key; the escrow metadata is encrypted to it',
       },
       {
         longName: 'auto-key-algorithm',
         hasArg: true,
         optArgCb: nonEmptyCb,
-        requiresAlso: 'auto-key',
+        environment: 'OPT_AUTO_KEY_ALGORITHM',
         description:
-          'auto key algorithm: P-256|P-384|P-521|RSA-OAEP (default P-521; RSA uses a 4096-bit modulus)',
+          'auto key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256 ' +
+          '(default ECDH-ES; ECDH-ES default curve P-521; RSA uses a 4096-bit modulus)',
+      },
+      {
+        longName: 'auto-key-crv',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_AUTO_KEY_CRV',
+        description: 'auto key curve for ECDH-ES: P-256|P-384|P-521 (ignored otherwise)',
+      },
+      {
+        longName: 'auto-key-length',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_AUTO_KEY_LENGTH',
+        description: 'auto key RSA modulus length in bits (ignored for ECDH-ES)',
       },
       {
         longName: 'auto-key-output-file',
         hasArg: true,
         optArgCb: nonEmptyCb,
-        requiresAlso: 'auto-key',
         description:
           'write the generated auto key private JWK here (mode 0600; must not exist); ' +
           'required with --auto-key when no --escrow-key-file is given',
+      },
+      {
+        longName: 'kv-key',
+        description:
+          'generate a per-escrow key in the key vault; the metadata is encrypted to it; ' +
+          'the expiry is enforced by the vault (the key is deleted at expiry)',
+      },
+      {
+        longName: 'kv-key-algorithm',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_KV_KEY_ALGORITHM',
+        description: 'key-vault key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256 (default ECDH-ES)',
+      },
+      {
+        longName: 'kv-key-crv',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_KV_KEY_CRV',
+        description: 'key-vault key curve for ECDH-ES: P-256|P-384|P-521 (default P-521)',
+      },
+      {
+        longName: 'kv-key-length',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_KV_KEY_LENGTH',
+        description: 'key-vault key RSA modulus length in bits (default 4096; ignored for ECDH-ES)',
+      },
+      {
+        longName: 'kv-url',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_KV_URL',
+        description: 'key vault base URL',
+      },
+      {
+        longName: 'kv-user',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        environment: 'OPT_KV_USER',
+        description: 'key vault user id (UUID)',
+      },
+      {
+        longName: 'kv-token',
+        hasArg: true,
+        optArgCb: nonEmptyCb,
+        conflictsWith: 'kv-token-file',
+        environment: 'OPT_KV_TOKEN',
+        description: 'key vault token (UUID); prefer --kv-token-file or OPT_KV_TOKEN over argv',
+      },
+      {
+        longName: 'kv-token-file',
+        hasArg: true,
+        optArgCb: existingFileCb,
+        environment: 'OPT_KV_TOKEN_FILE',
+        description: 'read the key vault token from a file',
       },
       {
         longName: 'vault-directory',
@@ -201,10 +272,39 @@ async function main(): Promise<void> {
   }
 
   const autoKey = opt.value('auto-key') as boolean;
+  const kvKey = opt.value('kv-key') as boolean;
   const autoKeyOutputFile = opt.value('auto-key-output-file') as string | undefined;
-  const keyFile = opt.value('escrow-key-file') as string | undefined;
-  if (keyFile === undefined && !autoKey) {
-    fail('--escrow-key-file is required unless --auto-key is given');
+  let keyFile = opt.value('escrow-key-file') as string | undefined;
+
+  // --- key vault connection (only when --kv-key) ---
+  let kv: { url: string; user: string; token: string } | undefined;
+  if (kvKey) {
+    if (keyFile !== undefined) {
+      // The escrow key is unused as a metadata recipient under --kv-key.
+      process.stderr.write('escrow: warning: --escrow-key-file is ignored with --kv-key\n');
+      keyFile = undefined;
+    }
+    const kvUrl = opt.value('kv-url') as string | undefined;
+    const kvUser = opt.value('kv-user') as string | undefined;
+    const kvTokenFile = opt.value('kv-token-file') as string | undefined;
+    let kvToken = opt.value('kv-token') as string | undefined;
+    if (kvToken === undefined && kvTokenFile !== undefined) {
+      try {
+        kvToken = readFileSync(kvTokenFile, 'utf8').trim();
+      } catch (err) {
+        fail(`cannot read key vault token from ${JSON.stringify(kvTokenFile)}: ${(err as Error).message}`);
+      }
+    }
+    if (kvUrl === undefined) fail('--kv-key requires --kv-url (or OPT_KV_URL)');
+    if (kvUser === undefined) fail('--kv-key requires --kv-user (or OPT_KV_USER)');
+    if (kvToken === undefined) {
+      fail('--kv-key requires --kv-token / --kv-token-file (or OPT_KV_TOKEN / OPT_KV_TOKEN_FILE)');
+    }
+    kv = { url: kvUrl, user: kvUser, token: kvToken };
+  }
+
+  if (keyFile === undefined && !autoKey && !kvKey) {
+    fail('--escrow-key-file is required unless --auto-key or --kv-key is given');
   }
   if (autoKey && keyFile === undefined && autoKeyOutputFile === undefined) {
     // Without an escrow key no auto-key.json is written; losing the auto key
@@ -239,20 +339,46 @@ async function main(): Promise<void> {
     escrowOptions.compression = opt.value('compression') as CompressionName;
   }
 
+  // Value validation (algorithm names, curve, modulus length) is the
+  // library's; the CLI passes strings through. --auto-key-length /
+  // --kv-key-length are numeric strings coerced here.
+  const intOrFail = (name: string): number => {
+    const v = opt.value(name) as string;
+    const n = Number.parseInt(v, 10);
+    if (!/^\d+$/.test(v) || !Number.isSafeInteger(n)) {
+      fail(`--${name} must be a positive integer`);
+    }
+    return n;
+  };
+
   const esc = new DataEscrow({
     vaultDir: opt.value('vault-directory') as string,
     ...(escrowKey !== undefined ? { escrowKey } : {}),
     ...(autoKey ? { autoKey: true } : {}),
-    // Value validation is the library's; an RSA-OAEP auto key uses the
-    // library-default 4096-bit modulus (not configurable in the CLI).
-    ...(opt.value('auto-key-algorithm') !== undefined
+    ...(autoKey && opt.value('auto-key-algorithm') !== undefined
       ? { autoKeyAlgorithm: opt.value('auto-key-algorithm') as AutoKeyAlgorithm }
+      : {}),
+    ...(autoKey && opt.value('auto-key-crv') !== undefined
+      ? { autoKeyCrv: opt.value('auto-key-crv') as 'P-256' | 'P-384' | 'P-521' }
+      : {}),
+    ...(autoKey && opt.value('auto-key-length') !== undefined
+      ? { autoKeyLength: intOrFail('auto-key-length') }
+      : {}),
+    ...(kvKey ? { kvKey: true, kv } : {}),
+    ...(kvKey && opt.value('kv-key-algorithm') !== undefined
+      ? { kvKeyAlgorithm: opt.value('kv-key-algorithm') as AutoKeyAlgorithm }
+      : {}),
+    ...(kvKey && opt.value('kv-key-crv') !== undefined
+      ? { kvKeyCrv: opt.value('kv-key-crv') as 'P-256' | 'P-384' | 'P-521' }
+      : {}),
+    ...(kvKey && opt.value('kv-key-length') !== undefined
+      ? { kvKeyLength: intOrFail('kv-key-length') }
       : {}),
   });
 
   const op = await esc.createEscrow(escrowOptions);
   try {
-    if (autoKeyOutputFile !== undefined) {
+    if (autoKey && autoKeyOutputFile !== undefined) {
       // The private JWK alone (it contains the public parameters) — the file
       // drops directly into decrypt-escrow's --escrow-secret-key-file.
       // Persisted before anything else happens, so a failure here can never

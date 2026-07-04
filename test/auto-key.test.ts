@@ -24,7 +24,7 @@ function readAutoKeyFile(dir: string): AutoKeyFile {
 }
 
 describe('auto key — option validation', () => {
-  it('constructor requires escrowKey unless autoKey is true', () => {
+  it('constructor requires escrowKey unless autoKey/kvKey is true', () => {
     const vaultDir = makeVaultDir();
     expect(() => new DataEscrow({ vaultDir } as never)).toThrow(/escrowKey is required/);
     expect(() => new DataEscrow({ vaultDir, escrowKey: null })).toThrow(/escrowKey is required/);
@@ -40,7 +40,7 @@ describe('auto key — option validation', () => {
     expect(new DataEscrow({ vaultDir, escrowKey: publicKey }).escrowKid).toBe(publicKey.kid);
   });
 
-  it('validates autoKey / autoKeyAlgorithm / rsaModulusLength eagerly, even when unused', () => {
+  it('validates autoKey / algorithm / crv / length eagerly, even when unused', () => {
     const vaultDir = makeVaultDir();
     const { publicKey } = ecEscrowKeys();
     const base = { vaultDir, escrowKey: publicKey };
@@ -49,23 +49,38 @@ describe('auto key — option validation', () => {
         /autoKey must be a boolean/,
       );
     }
-    for (const alg of ['P-512', 'RSA', 'rsa-oaep', '', 42]) {
+    // curves are no longer algorithm values
+    for (const alg of ['P-256', 'P-521', 'RSA', 'rsa-oaep', '', 42]) {
       expect(() => new DataEscrow({ ...base, autoKeyAlgorithm: alg as never })).toThrow(
         /autoKeyAlgorithm/,
       );
     }
+    for (const crv of ['P-192', 'ECDH-ES', '', 42]) {
+      expect(() => new DataEscrow({ ...base, autoKeyCrv: crv as never })).toThrow(/autoKeyCrv/);
+    }
     for (const bits of [2047, 16385, 4096.5, '4096', NaN]) {
-      expect(() => new DataEscrow({ ...base, rsaModulusLength: bits as never })).toThrow(
-        /rsaModulusLength/,
+      expect(() => new DataEscrow({ ...base, autoKeyLength: bits as never })).toThrow(
+        /autoKeyLength/,
       );
     }
     // valid but unused (autoKey stays off): accepted
     expect(
-      new DataEscrow({ ...base, autoKeyAlgorithm: 'RSA-OAEP', rsaModulusLength: 2048 }),
+      new DataEscrow({
+        ...base,
+        autoKeyAlgorithm: 'RSA-OAEP-256',
+        autoKeyCrv: 'P-256',
+        autoKeyLength: 2048,
+      }),
     ).toBeInstanceOf(DataEscrow);
-    // null means "not set" for all three
+    // null means "not set" for all
     expect(
-      new DataEscrow({ ...base, autoKey: null, autoKeyAlgorithm: null, rsaModulusLength: null }),
+      new DataEscrow({
+        ...base,
+        autoKey: null,
+        autoKeyAlgorithm: null,
+        autoKeyCrv: null,
+        autoKeyLength: null,
+      }),
     ).toBeInstanceOf(DataEscrow);
   });
 
@@ -76,29 +91,26 @@ describe('auto key — option validation', () => {
     await expect(esc.createEscrow({ autoKey: 'on' as never })).rejects.toThrow(
       /autoKey must be a boolean/,
     );
-    await expect(esc.createEscrow({ autoKeyAlgorithm: 'P-192' as never })).rejects.toThrow(
+    await expect(esc.createEscrow({ autoKeyAlgorithm: 'P-256' as never })).rejects.toThrow(
       /autoKeyAlgorithm/,
     );
-    await expect(esc.createEscrow({ rsaModulusLength: 1024 })).rejects.toThrow(
-      /rsaModulusLength/,
-    );
+    await expect(esc.createEscrow({ autoKeyCrv: 'P-192' as never })).rejects.toThrow(/autoKeyCrv/);
+    await expect(esc.createEscrow({ autoKeyLength: 1024 })).rejects.toThrow(/autoKeyLength/);
   });
 
-  it('rejects per-op escrowKey null unless effective autoKey is true', async () => {
+  it('rejects per-op escrowKey null unless effective autoKey/kvKey is true', async () => {
     const vaultDir = makeVaultDir();
     const { publicKey } = ecEscrowKeys();
     const esc = new DataEscrow({ vaultDir, escrowKey: publicKey });
     await expect(esc.createEscrow({ escrowKey: null })).rejects.toThrow(
-      /requires autoKey to be enabled/,
+      /requires autoKey or kvKey/,
     );
     // constructor-level autoKey off + per-op off, constructor key inherited: fine
     const op = await esc.createEscrow({ autoKey: false });
     await op.destroy();
     // per-op autoKey false with an autoKey-only constructor: no key from anywhere
     const esc2 = new DataEscrow({ vaultDir, autoKey: true });
-    await expect(esc2.createEscrow({ autoKey: false })).rejects.toThrow(
-      /requires autoKey to be enabled/,
-    );
+    await expect(esc2.createEscrow({ autoKey: false })).rejects.toThrow(/requires autoKey or kvKey/);
   });
 
   it('validates a per-op escrowKey JWK with the constructor rules', async () => {
@@ -121,30 +133,38 @@ describe('auto key — option validation', () => {
 });
 
 describe('auto key — round-trip per algorithm', () => {
-  for (const algorithm of ['P-256', 'P-384', 'P-521', 'RSA-OAEP'] as const) {
-    it(`escrows and decrypts with a ${algorithm} auto key`, async () => {
+  const cases = [
+    { name: 'ECDH-ES P-256', algorithm: 'ECDH-ES', crv: 'P-256' },
+    { name: 'ECDH-ES P-384', algorithm: 'ECDH-ES', crv: 'P-384' },
+    { name: 'ECDH-ES P-521', algorithm: 'ECDH-ES', crv: 'P-521' },
+    { name: 'RSA-OAEP', algorithm: 'RSA-OAEP', crv: undefined },
+    { name: 'RSA-OAEP-256', algorithm: 'RSA-OAEP-256', crv: undefined },
+  ] as const;
+  for (const c of cases) {
+    it(`escrows and decrypts with a ${c.name} auto key`, async () => {
       const vaultDir = makeVaultDir();
       const { publicKey } = ecEscrowKeys();
       const esc = new DataEscrow({
         vaultDir,
         escrowKey: publicKey,
         autoKey: true,
-        autoKeyAlgorithm: algorithm,
-        rsaModulusLength: 2048, // non-default; only consulted for RSA-OAEP
+        autoKeyAlgorithm: c.algorithm,
+        ...(c.crv !== undefined ? { autoKeyCrv: c.crv } : {}),
+        autoKeyLength: 2048, // non-default; only consulted for RSA
       });
       const op = await esc.createEscrow({ reference: 'auto-rt', expiresAfter: 3600 });
       expect(op.autoKid).toMatch(AUTO_KID_RE);
       const pair = op.autoKeyPair();
       expect(pair.secretKey.kid).toBe(op.autoKid);
       expect(pair.publicKey.kid).toBe(op.autoKid);
-      if (algorithm === 'RSA-OAEP') {
+      if (c.algorithm.startsWith('RSA')) {
         expect(pair.secretKey.kty).toBe('RSA');
-        expect(pair.secretKey.alg).toBe('RSA-OAEP');
-        expect(pair.publicKey.alg).toBe('RSA-OAEP');
+        expect(pair.secretKey.alg).toBe(c.algorithm);
+        expect(pair.publicKey.alg).toBe(c.algorithm);
         expect(Buffer.from(pair.publicKey.n as string, 'base64url')).toHaveLength(2048 / 8);
       } else {
         expect(pair.secretKey.kty).toBe('EC');
-        expect(pair.secretKey.crv).toBe(algorithm);
+        expect(pair.secretKey.crv).toBe(c.crv);
       }
 
       const content = randomBytes(1024);
@@ -156,8 +176,6 @@ describe('auto key — round-trip per algorithm', () => {
       const m = readManifest(dir);
       expect(m.metadata.kid).toBe(op.autoKid);
 
-      // The independently stored auto secret key opens the escrow through
-      // the regular reader, tamper binding included.
       const dec = new DataEscrowDecrypt({ escrowSecretKey: pair.secretKey });
       const opened = await dec.decrypt(m);
       const data = opened.data();
@@ -170,33 +188,34 @@ describe('auto key — round-trip per algorithm', () => {
         content,
       );
 
-      // ... and through the raw test reader too.
       expect(openEscrow(dir, pair.secretKey).files[0]?.bytes).toEqual(content);
     });
   }
 
-  it('defaults to a P-521 auto key', async () => {
+  it('defaults to an ECDH-ES P-521 auto key', async () => {
     const vaultDir = makeVaultDir();
     const esc = new DataEscrow({ vaultDir, autoKey: true });
     const op = await esc.createEscrow();
-    expect(op.autoKeyPair().secretKey.crv).toBe('P-521');
+    const secret = op.autoKeyPair().secretKey;
+    expect(secret.kty).toBe('EC');
+    expect(secret.crv).toBe('P-521');
     await op.destroy();
   });
 
   it('per-operation options override the constructor defaults', async () => {
     const vaultDir = makeVaultDir();
     const { publicKey } = ecEscrowKeys();
-    const esc = new DataEscrow({ vaultDir, escrowKey: publicKey, autoKeyAlgorithm: 'P-256' });
-    // autoKey enabled per op only; algorithm inherited from the constructor
+    const esc = new DataEscrow({ vaultDir, escrowKey: publicKey, autoKeyCrv: 'P-256' });
+    // autoKey enabled per op only; curve inherited from the constructor
     const op = await esc.createEscrow({ autoKey: true });
     expect(op.autoKeyPair().secretKey.crv).toBe('P-256');
     await op.destroy();
-    // per-op algorithm beats the constructor's
-    const op2 = await esc.createEscrow({ autoKey: true, autoKeyAlgorithm: 'P-384' });
+    // per-op curve beats the constructor's
+    const op2 = await esc.createEscrow({ autoKey: true, autoKeyCrv: 'P-384' });
     expect(op2.autoKeyPair().secretKey.crv).toBe('P-384');
     await op2.destroy();
     // null inherits
-    const op3 = await esc.createEscrow({ autoKey: true, autoKeyAlgorithm: null });
+    const op3 = await esc.createEscrow({ autoKey: true, autoKeyCrv: null });
     expect(op3.autoKeyPair().secretKey.crv).toBe('P-256');
     await op3.destroy();
   });
@@ -210,7 +229,7 @@ describe('auto key — auto-key.json', () => {
       vaultDir,
       escrowKey: keys.publicKey,
       autoKey: true,
-      autoKeyAlgorithm: 'P-256',
+      autoKeyCrv: 'P-256',
     });
     const op = await esc.createEscrow(expiresAfter !== undefined ? { expiresAfter } : {});
     const pair = op.autoKeyPair();
@@ -223,16 +242,14 @@ describe('auto key — auto-key.json', () => {
     const { dir } = await committedAutoEscrow();
     expect(existsSync(join(dir, 'auto-key.json'))).toBe(true);
 
-    // no escrow key: no auto-key.json
     const vaultDir = makeVaultDir();
-    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyCrv: 'P-256' });
     const op = await esc.createEscrow();
     op.autoKeyPair();
     await op.addData('x');
     const id = await op.commit();
     expect(existsSync(join(escrowDir(vaultDir, id), 'auto-key.json'))).toBe(false);
 
-    // no auto key: no auto-key.json (covered daily by the existing suite too)
     const { publicKey } = ecEscrowKeys();
     const esc2 = new DataEscrow({ vaultDir, escrowKey: publicKey });
     const id2 = await esc2.escrow('y');
@@ -344,7 +361,6 @@ describe('auto key — autoKeyPair() and the commit guard', () => {
     const op2 = await esc2.createEscrow();
     expect(op2.autoKid).toBeNull();
     expect(() => op2.autoKeyPair()).toThrow(/auto key is not enabled/);
-    // an accessor, not a mutator: the failed call must not destroy the op
     expect(op2.state).toBe('pending');
     await op2.destroy();
   });
@@ -364,11 +380,10 @@ describe('auto key — autoKeyPair() and the commit guard', () => {
 
   it('commit refuses, without destroying, when the auto key was never collected', async () => {
     const vaultDir = makeVaultDir();
-    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyCrv: 'P-256' });
     const op = await esc.createEscrow();
     await op.addData('precious');
     await expect(op.commit()).rejects.toThrow(/unrecoverable/);
-    // recoverable: still pending, so the pair can be collected and committed
     expect(op.state).toBe('pending');
     const pair = op.autoKeyPair();
     const id = await op.commit();
@@ -391,12 +406,11 @@ describe('auto key — autoKeyPair() and the commit guard', () => {
 
   it('one-shot escrow() rejects an effective-null escrow key eagerly', async () => {
     const vaultDir = makeVaultDir();
-    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyCrv: 'P-256' });
     await expect(esc.escrow('data')).rejects.toThrow(/one-shot/);
     const { publicKey, secretKey } = ecEscrowKeys();
     const esc2 = new DataEscrow({ vaultDir, escrowKey: publicKey, autoKey: true });
-    // with an escrow key the one-shot works and stays recoverable
-    const id = await esc2.escrow('fine', { autoKeyAlgorithm: 'P-256' });
+    const id = await esc2.escrow('fine', { autoKeyCrv: 'P-256' });
     const dir = escrowDir(vaultDir, id);
     const dec = new DataEscrowDecrypt({ escrowSecretKey: secretKey });
     const { secretKey: autoSecret } = await dec.decryptAutoKey(readAutoKeyFile(dir));
@@ -405,7 +419,7 @@ describe('auto key — autoKeyPair() and the commit guard', () => {
 
   it('destroy() removes the staging directory of an uncommitted auto escrow', async () => {
     const vaultDir = makeVaultDir();
-    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyAlgorithm: 'P-256' });
+    const esc = new DataEscrow({ vaultDir, autoKey: true, autoKeyCrv: 'P-256' });
     const op = await esc.createEscrow();
     await op.addData(1);
     await op.destroy();
