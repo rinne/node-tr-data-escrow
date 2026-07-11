@@ -1,6 +1,6 @@
 {
     "name": "tr-data-escrow",
-    "version": "4.0.0",
+    "version": "4.0.1",
     "description": "Cryptographic escrow of JSON data and files into a filesystem vault. Data and file keys are encrypted to a public escrow key (RSA-OAEP or ECDH-ES) as JWE; files are streamed AES-256-GCM. Each escrow is a self-contained, atomically placed directory.",
     "keywords": [
         "escrow",
@@ -47,7 +47,7 @@
     "dependencies": {
         "optist": "^2.0.1",
         "tr-jwe": "^2.1.0",
-        "tr-key-vault-client": "^0.2.0"
+        "tr-key-vault-client": "^1.0.0"
     },
     "devDependencies": {
         "@types/node": "^24.0.0",

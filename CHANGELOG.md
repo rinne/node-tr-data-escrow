@@ -31,9 +31,10 @@ JOSE stack. **Existing escrows written by 2.x/3.x decrypt unchanged.**
 ### Changed
 
 - **Breaking:** dependency majors — `tr-jwe ^2.1.0` (brings `tr-kmac` as a
-  transitive dependency). The `AutoKeyAlgorithm`/`KvKeyAlgorithm` type
-  unions widened with the ML-KEM identifiers (a compile-time break for
-  exhaustive `switch`es over them).
+  transitive dependency) and `tr-key-vault-client ^1.0.0` (functionally
+  identical to 0.2.0; re-versioned to mark production). The
+  `AutoKeyAlgorithm`/`KvKeyAlgorithm` type unions widened with the ML-KEM
+  identifiers (a compile-time break for exhaustive `switch`es over them).
 - RSA key-vault key generation no longer sends `keyLength` for non-RSA
   algorithms (parameter hygiene; behaviour unchanged for existing
   algorithms).
