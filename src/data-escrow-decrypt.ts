@@ -181,6 +181,14 @@ function derivePublicJwk(secret: Record<string, unknown>): Record<string, unknow
   if (secret.kty === 'EC') {
     return { kty: 'EC', crv: secret.crv, x: secret.x, y: secret.y, kid: secret.kid };
   }
+  if (secret.kty === 'AKP') {
+    return {
+      kty: 'AKP',
+      ...(secret.alg !== undefined ? { alg: secret.alg } : {}),
+      pub: secret.pub,
+      kid: secret.kid,
+    };
+  }
   throw new EscrowIntegrityError('autoKey.key.kty', 'unsupported auto key type');
 }
 

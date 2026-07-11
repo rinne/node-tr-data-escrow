@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.2] - 2026-07-11
+
+### Fixed
+
+- `decryptAutoKey` failed with `EscrowIntegrityError` for ML-KEM auto keys:
+  the reader-side public-JWK derivation lacked an AKP branch, so escrows
+  whose auto key was ML-KEM could be written but their auto key could not be
+  recovered from `auto-key.json`. Found in a post-release adversarial
+  security review of the ML-KEM paths (which found no vulnerabilities — the
+  failure was fail-closed, availability-only). Regression test added.
+
+### Changed
+
+- Documentation: post-quantum standards status. draft-ietf-jose-pqc-kem-06
+  removed the JOSE mechanism (the document is COSE-only from -06 on, and
+  JWE post-quantum registrations are expected via the HPKE track), so the
+  `ML-KEM-*@spinium.com` identifiers are the stable long-term form.
+
 ## [4.0.0] - 2026-07-11
 
 Post-quantum ML-KEM escrow keys in all three key modes, on the modernised

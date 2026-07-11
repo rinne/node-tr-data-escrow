@@ -293,6 +293,34 @@ describe('auto key — auto-key.json', () => {
     expect(opened.data().metadata.payloadData.id).toBe(id);
   });
 
+  it('decryptAutoKey recovers an ML-KEM auto key (AKP public derivation)', async () => {
+    const vaultDir = makeVaultDir();
+    const keys = ecEscrowKeys('P-384');
+    const esc = new DataEscrow({
+      vaultDir,
+      escrowKey: keys.publicKey,
+      autoKey: true,
+      autoKeyAlgorithm: 'ML-KEM-768@spinium.com',
+    });
+    const op = await esc.createEscrow();
+    const pair = op.autoKeyPair();
+    await op.addData('pq payload');
+    const id = await op.commit();
+    const dir = escrowDir(vaultDir, id);
+
+    const dec = new DataEscrowDecrypt({ escrowSecretKey: keys.secretKey });
+    const recovered = await dec.decryptAutoKey(readAutoKeyFile(dir));
+    expect(recovered.secretKey).toEqual(pair.secretKey);
+    expect(recovered.publicKey.priv).toBeUndefined();
+    expect(recovered.publicKey.alg).toBe('ML-KEM-768');
+    expect(recovered.publicKey.pub).toBe(pair.secretKey.pub);
+    expect(recovered.publicKey.kid).toBe(pair.secretKey.kid);
+
+    const autoDec = new DataEscrowDecrypt({ escrowSecretKey: recovered.secretKey });
+    const opened = await autoDec.decrypt(readManifest(dir));
+    expect(opened.data().metadata.payloadData.id).toBe(id);
+  });
+
   it('detects cleartext tampering of kid/iat/exp', async () => {
     const { dir, keys } = await committedAutoEscrow(3600);
     const dec = new DataEscrowDecrypt({ escrowSecretKey: keys.secretKey });

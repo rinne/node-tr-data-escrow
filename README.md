@@ -359,8 +359,12 @@ The `escrowKey` must be a **public** JWK carrying a non-empty `kid`, one of:
   `{ kty: 'AKP', alg: 'ML-KEM-512' | 'ML-KEM-768' | 'ML-KEM-1024', kid, pub }`.
   Sealed with the corresponding `ML-KEM-*@spinium.com` JWE algorithm —
   tr-jwe's collision-resistant identifiers, frozen at
-  draft-ietf-jose-pqc-kem-05 semantics. Note that the JWK `alg` member
-  carries the **unsuffixed** variant, as JOSE-level key validation requires.
+  draft-ietf-jose-pqc-kem-05 semantics (the last draft revision with a
+  JWE mechanism; the IETF later moved JWE post-quantum work to an
+  HPKE-based track, so these suffixed identifiers are the stable
+  long-term form and escrows sealed with them decrypt forever). Note
+  that the JWK `alg` member carries the **unsuffixed** variant, as
+  JOSE-level key validation requires.
 
 A key carrying private material (an RSA/EC `d` or AKP `priv` member) is
 rejected — the writer must not be able to hold decryption power. The key's
