@@ -31,6 +31,9 @@ describe('kvKey — writer + reader round-trip', () => {
     { algorithm: 'ECDH-ES', crv: 'P-521' },
     { algorithm: 'RSA-OAEP', length: 2048 },
     { algorithm: 'RSA-OAEP-256', length: 2048 },
+    { algorithm: 'ML-KEM-512@spinium.com' },
+    { algorithm: 'ML-KEM-768@spinium.com' },
+    { algorithm: 'ML-KEM-1024@spinium.com' },
   ] as const;
   for (const c of cases) {
     it(`round-trips a ${c.algorithm}${'crv' in c ? ' ' + c.crv : ''} kv key`, async () => {

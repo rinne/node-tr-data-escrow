@@ -8,6 +8,7 @@ import {
   makeVaultDir,
   ecEscrowKeys,
   rsaEscrowKeys,
+  mlKemEscrowKeys,
   escrowDir,
   readManifest,
   openEscrow,
@@ -150,6 +151,33 @@ describe('createEscrow() builder + files', () => {
     expect(opened.data.map((d) => d.data)).toEqual([{ rsa: true }]);
     expect(opened.files[0]?.bytes).toEqual(content);
   });
+
+  for (const variant of ['ML-KEM-512', 'ML-KEM-768', 'ML-KEM-1024']) {
+    it(`round-trips with an ${variant} escrow key`, async () => {
+      const vaultDir = makeVaultDir();
+      const { publicKey, secretKey } = mlKemEscrowKeys(variant);
+      const esc = new DataEscrow({ vaultDir, escrowKey: publicKey });
+
+      const op = await esc.createEscrow();
+      await op.addData({ pq: variant });
+      const content = randomBytes(1000);
+      await op.addFileBuffer(content, { name: 'q.bin' });
+      const id = await op.commit();
+
+      // The metadata is sealed under the SUFFIXED JWE algorithm while the
+      // escrow key JWK itself carries the unsuffixed variant.
+      const m = readManifest(escrowDir(vaultDir, id));
+      const header = JSON.parse(
+        Buffer.from((m.metadata.payload as string).split('.')[0]!, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      expect(header.alg).toBe(`${variant}@spinium.com`);
+      expect(header.enc).toBe('A256GCM');
+
+      const opened = openEscrow(escrowDir(vaultDir, id), secretKey);
+      expect(opened.data.map((d) => d.data)).toEqual([{ pq: variant }]);
+      expect(opened.files[0]?.bytes).toEqual(content);
+    });
+  }
 });
 
 describe('vault layout', () => {

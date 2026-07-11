@@ -13,7 +13,14 @@ import type KeyVaultClient from 'tr-key-vault-client';
 import type { KeyVaultClientOptions } from 'tr-key-vault-client';
 import { EC_KEY_CURVES, RSA_MODULUS_LENGTH_MIN, RSA_MODULUS_LENGTH_MAX, type EcKeyCurve } from './key-gen';
 
-export const KV_KEY_ALGORITHMS = ['ECDH-ES', 'RSA-OAEP', 'RSA-OAEP-256'] as const;
+export const KV_KEY_ALGORITHMS = [
+  'ECDH-ES',
+  'RSA-OAEP',
+  'RSA-OAEP-256',
+  'ML-KEM-512@spinium.com',
+  'ML-KEM-768@spinium.com',
+  'ML-KEM-1024@spinium.com',
+] as const;
 /** JWE key-management algorithm of the generated key-vault key. */
 export type KvKeyAlgorithm = (typeof KV_KEY_ALGORITHMS)[number];
 export type KvKeyCrv = EcKeyCurve;
@@ -44,7 +51,10 @@ export function validateKvKey(value: unknown): boolean | null {
 export function validateKvKeyAlgorithm(value: unknown): KvKeyAlgorithm | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'string' || !KV_KEY_ALGORITHMS.includes(value as KvKeyAlgorithm)) {
-    throw new TypeError('kvKeyAlgorithm must be one of "ECDH-ES", "RSA-OAEP", "RSA-OAEP-256"');
+    throw new TypeError(
+      'kvKeyAlgorithm must be one of "ECDH-ES", "RSA-OAEP", "RSA-OAEP-256", ' +
+        '"ML-KEM-512@spinium.com", "ML-KEM-768@spinium.com", "ML-KEM-1024@spinium.com"',
+    );
   }
   return value as KvKeyAlgorithm;
 }
@@ -227,9 +237,11 @@ export class KvVault {
       } = { returnPublicKey: true };
       if (alg === 'ECDH-ES') {
         if (options.crv !== undefined) genOpts.crv = options.crv;
-      } else if (options.keyLength !== undefined) {
-        genOpts.keyLength = options.keyLength;
+      } else if (alg === 'RSA-OAEP' || alg === 'RSA-OAEP-256') {
+        if (options.keyLength !== undefined) genOpts.keyLength = options.keyLength;
       }
+      // ML-KEM: the variant is encoded in the algorithm name; the vault
+      // rejects crv/keyLength for it, so neither is ever sent.
       if (options.exp !== undefined) genOpts.exp = options.exp;
       const result = await client.generateKey(alg, genOpts);
       if (!result || typeof result.kid !== 'string' || !result.key) {

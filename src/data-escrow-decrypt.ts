@@ -14,6 +14,7 @@ import {
   type KvReaderConnection,
   type KvReaderOption,
 } from './kv';
+import { ML_KEM_VARIANTS, type MlKemVariant } from './key-gen';
 
 /** Construction options for {@link DataEscrowDecrypt}. */
 export interface DataEscrowDecryptOptions {
@@ -25,6 +26,8 @@ export interface DataEscrowDecryptOptions {
    *   - RSA: `{ kty:'RSA', kid, n, e, d, ... }`, modulus >= 2048 bits,
    *     `alg` (when present) `"RSA-OAEP"` or `"RSA-OAEP-256"`
    *   - EC:  `{ kty:'EC', crv:'P-256'|'P-384'|'P-521', kid, x, y, d }`
+   *   - AKP (ML-KEM): `{ kty:'AKP', alg:'ML-KEM-512'|'ML-KEM-768'|'ML-KEM-1024',
+   *     kid, priv, pub }` (the unsuffixed variant in `alg`)
    */
   escrowSecretKey?: Record<string, unknown> | Record<string, unknown>[];
   /**
@@ -48,6 +51,22 @@ function validateEscrowSecretKey(key: unknown): { kid: string; jwk: Record<strin
   const k = key as Record<string, unknown>;
   if (typeof k.kid !== 'string' || k.kid.length === 0) {
     throw new TypeError('escrowSecretKey.kid must be a non-empty string');
+  }
+  if (k.kty === 'AKP') {
+    // An ML-KEM private key: the seed lives in "priv" (not "d") and the JWK
+    // alg member carries the unsuffixed variant.
+    if (typeof k.alg !== 'string' || !ML_KEM_VARIANTS.includes(k.alg as MlKemVariant)) {
+      throw new TypeError(
+        'AKP escrowSecretKey alg must be one of ML-KEM-512, ML-KEM-768, ML-KEM-1024',
+      );
+    }
+    if (typeof k.priv !== 'string' || k.priv.length === 0) {
+      throw new TypeError('AKP escrowSecretKey must be a private key (missing "priv")');
+    }
+    if (typeof k.pub !== 'string' || k.pub.length === 0) {
+      throw new TypeError('AKP escrowSecretKey must have a string "pub"');
+    }
+    return { kid: k.kid, jwk: structuredClone(k) };
   }
   if (typeof k.d !== 'string' || k.d.length === 0) {
     throw new TypeError('escrowSecretKey must be a private key (missing "d")');
@@ -75,7 +94,7 @@ function validateEscrowSecretKey(key: unknown): { kid: string; jwk: Record<strin
       throw new TypeError('EC escrowSecretKey must have string "x" and "y"');
     }
   } else {
-    throw new TypeError('escrowSecretKey.kty must be "RSA" or "EC"');
+    throw new TypeError('escrowSecretKey.kty must be "RSA", "EC" or "AKP"');
   }
   return { kid: k.kid, jwk: structuredClone(k) };
 }

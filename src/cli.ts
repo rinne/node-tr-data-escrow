@@ -123,8 +123,9 @@ async function main(): Promise<void> {
         optArgCb: nonEmptyCb,
         environment: 'OPT_AUTO_KEY_ALGORITHM',
         description:
-          'auto key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256 ' +
-          '(default ECDH-ES; ECDH-ES default curve P-521; RSA uses a 4096-bit modulus)',
+          'auto key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256|ML-KEM-{512,768,1024}@spinium.com ' +
+          '(default ECDH-ES; ECDH-ES default curve P-521; RSA uses a 4096-bit modulus; ' +
+          'ML-KEM takes no curve/length)',
       },
       {
         longName: 'auto-key-crv',
@@ -159,7 +160,9 @@ async function main(): Promise<void> {
         hasArg: true,
         optArgCb: nonEmptyCb,
         environment: 'OPT_KV_KEY_ALGORITHM',
-        description: 'key-vault key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256 (default ECDH-ES)',
+        description:
+          'key-vault key algorithm: ECDH-ES|RSA-OAEP|RSA-OAEP-256|' +
+          'ML-KEM-{512,768,1024}@spinium.com (default ECDH-ES)',
       },
       {
         longName: 'kv-key-crv',

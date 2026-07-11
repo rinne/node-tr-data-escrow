@@ -14,6 +14,8 @@ import { randomUUID } from 'node:crypto';
 import {
   ecKeyPairGen,
   rsaKeyPairGen,
+  mlKemKeyPairGen,
+  mlKemVariantOfJweAlg,
   EC_KEY_CURVES,
   RSA_MODULUS_LENGTH_MIN,
   RSA_MODULUS_LENGTH_MAX,
@@ -28,7 +30,14 @@ import {
  */
 export const AUTO_KID_PREFIX = 'auto:';
 
-export const AUTO_KEY_ALGORITHMS = ['ECDH-ES', 'RSA-OAEP', 'RSA-OAEP-256'] as const;
+export const AUTO_KEY_ALGORITHMS = [
+  'ECDH-ES',
+  'RSA-OAEP',
+  'RSA-OAEP-256',
+  'ML-KEM-512@spinium.com',
+  'ML-KEM-768@spinium.com',
+  'ML-KEM-1024@spinium.com',
+] as const;
 /** JWE key-management algorithm of the generated auto key pair. */
 export type AutoKeyAlgorithm = (typeof AUTO_KEY_ALGORITHMS)[number];
 
@@ -53,7 +62,8 @@ export function validateAutoKeyAlgorithm(value: unknown): AutoKeyAlgorithm | nul
   if (value === undefined || value === null) return null;
   if (typeof value !== 'string' || !AUTO_KEY_ALGORITHMS.includes(value as AutoKeyAlgorithm)) {
     throw new TypeError(
-      'autoKeyAlgorithm must be one of "ECDH-ES", "RSA-OAEP", "RSA-OAEP-256"',
+      'autoKeyAlgorithm must be one of "ECDH-ES", "RSA-OAEP", "RSA-OAEP-256", ' +
+        '"ML-KEM-512@spinium.com", "ML-KEM-768@spinium.com", "ML-KEM-1024@spinium.com"',
     );
   }
   return value as AutoKeyAlgorithm;
@@ -112,6 +122,16 @@ export async function generateAutoKeyPair(
     const { secretKey, publicKey } = await rsaKeyPairGen(options.length);
     secretKey.alg = algorithm;
     publicKey.alg = algorithm;
+    secretKey.kid = kid;
+    publicKey.kid = kid;
+    return { secretKey, publicKey, kid, alg: algorithm };
+  }
+  const mlKemVariant = mlKemVariantOfJweAlg(algorithm);
+  if (mlKemVariant !== null) {
+    // The AKP JWKs keep the UNSUFFIXED variant in `alg` (tr-jwe key
+    // validation requirement); the returned JWE algorithm is suffixed.
+    // Neither `crv` nor `length` applies.
+    const { secretKey, publicKey } = await mlKemKeyPairGen(mlKemVariant);
     secretKey.kid = kid;
     publicKey.kid = kid;
     return { secretKey, publicKey, kid, alg: algorithm };

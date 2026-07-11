@@ -6,7 +6,7 @@
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { decrypt as jweDecrypt } from 'tr-jwe';
-import { ecKeyPairGen, rsaKeyPairGen } from '../src/key-gen';
+import { ecKeyPairGen, rsaKeyPairGen, mlKemKeyPairGen, mlKemVariantOfJweAlg } from '../src/key-gen';
 
 export const KV_USER = '31b27ab4-a826-4f83-b383-3893bff8a1a6';
 export const KV_TOKEN = '3aa577dc-e8f4-4d70-9258-842a6d1af26d';
@@ -69,6 +69,15 @@ export async function startStubVault(): Promise<StubVault> {
           const pair = await rsaKeyPairGen((data.keyLength as number | undefined) ?? 4096);
           secret = { ...pair.secretKey, alg };
           publicJwk = { ...pair.publicKey, alg };
+        } else if (mlKemVariantOfJweAlg(alg) !== null) {
+          // Real-vault rule: crv/keyLength are rejected for ML-KEM, and the
+          // AKP JWKs keep the unsuffixed variant in their alg member.
+          if (data.crv !== undefined || data.keyLength !== undefined) {
+            return err(1100, 'crv/keyLength not applicable to ML-KEM');
+          }
+          const pair = await mlKemKeyPairGen(mlKemVariantOfJweAlg(alg)!);
+          secret = pair.secretKey;
+          publicJwk = pair.publicKey;
         } else {
           return err(1100, `unsupported alg ${String(alg)}`);
         }

@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { encryptTrde } from './trde-encrypt';
 import type { CompressionName } from './trde';
 import { AUTO_KID_PREFIX } from './auto-key';
+import { ML_KEM_VARIANTS, ML_KEM_JWE_ALG_SUFFIX, type MlKemVariant } from './key-gen';
 
 /** Result of validating a public escrow key. */
 export interface EscrowKeyInfo {
@@ -13,7 +14,12 @@ export interface EscrowKeyInfo {
   /** The key identifier (`kid`). */
   escrowKid: string;
   /** The JWE key-management algorithm to use with this key. */
-  escrowAlg: 'RSA-OAEP' | 'ECDH-ES';
+  escrowAlg:
+    | 'RSA-OAEP'
+    | 'ECDH-ES'
+    | 'ML-KEM-512@spinium.com'
+    | 'ML-KEM-768@spinium.com'
+    | 'ML-KEM-1024@spinium.com';
 }
 
 const EC_CURVES = ['P-256', 'P-384', 'P-521'];
@@ -23,7 +29,8 @@ const EC_CURVES = ['P-256', 'P-384', 'P-521'];
  * sanitized key, its kid, and the JWE algorithm to use. Accepts:
  *   - RSA-OAEP public keys with modulus >= 2048 bits
  *   - EC public keys on P-256 / P-384 / P-521 (used with ECDH-ES)
- * A key carrying private material (`d`) is rejected.
+ *   - AKP ML-KEM public keys (used with the suffixed ML-KEM-* JWE algorithms)
+ * A key carrying private material (`d`/`priv`) is rejected.
  */
 export function validateEscrowKey(key: unknown): EscrowKeyInfo {
   if (!key || typeof key !== 'object' || Array.isArray(key)) {
@@ -78,7 +85,27 @@ export function validateEscrowKey(key: unknown): EscrowKeyInfo {
     };
   }
 
-  throw new TypeError('escrowKey.kty must be "RSA" or "EC"');
+  if (k.kty === 'AKP') {
+    // An ML-KEM public key. The JWK carries the UNSUFFIXED variant in `alg`
+    // (as node:crypto emits and tr-jwe requires); the JWE key-management
+    // algorithm is the suffixed identifier.
+    if (typeof k.alg !== 'string' || !ML_KEM_VARIANTS.includes(k.alg as MlKemVariant)) {
+      throw new TypeError('AKP escrowKey alg must be one of ML-KEM-512, ML-KEM-768, ML-KEM-1024');
+    }
+    if (typeof k.pub !== 'string' || k.pub.length === 0) {
+      throw new TypeError('AKP escrowKey must have a string "pub"');
+    }
+    if (k.priv !== undefined) {
+      throw new TypeError('escrowKey must be a public key (AKP private member "priv" present)');
+    }
+    return {
+      escrowKey: { kty: 'AKP', alg: k.alg, pub: k.pub, kid },
+      escrowKid: kid,
+      escrowAlg: (k.alg + ML_KEM_JWE_ALG_SUFFIX) as EscrowKeyInfo['escrowAlg'],
+    };
+  }
+
+  throw new TypeError('escrowKey.kty must be "RSA", "EC" or "AKP"');
 }
 
 /**

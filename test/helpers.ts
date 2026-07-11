@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decrypt } from 'tr-jwe';
-import { ecKeyGen, macKeyGen, type Jwk } from 'tr-jwk';
+import { ecKeyGen, macKeyGen, mlKemKeyGen, type Jwk } from 'tr-jwk';
 
 /** A fresh, isolated vault directory for a test. */
 export function makeVaultDir(): string {
@@ -27,6 +27,11 @@ export function rsaEscrowKeys(alg = 'RS384'): { publicKey: Jwk; secretKey: Jwk }
     kid: secretKey.kid as string,
   };
   return { publicKey, secretKey };
+}
+
+/** An ML-KEM (AKP) escrow key pair for tests; JWK alg is the unsuffixed variant. */
+export function mlKemEscrowKeys(variant = 'ML-KEM-768'): { publicKey: Jwk; secretKey: Jwk } {
+  return mlKemKeyGen(variant);
 }
 
 /** The committed location of an escrow inside a vault. */

@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-07-11
+
+Post-quantum ML-KEM escrow keys in all three key modes, on the modernised
+JOSE stack. **Existing escrows written by 2.x/3.x decrypt unchanged.**
+
+### Added
+
+- **ML-KEM (FIPS 203) support** in every key mode, using tr-jwe's
+  collision-resistant JWE algorithm identifiers
+  `ML-KEM-{512,768,1024}@spinium.com` (frozen at draft-ietf-jose-pqc-kem-05
+  semantics; content encryption always `A256GCM`):
+  - escrow keys: AKP public JWKs
+    (`{ kty:'AKP', alg:'ML-KEM-*', kid, pub }`) accepted by `escrowKey`,
+    sealed under the corresponding suffixed algorithm;
+  - auto keys: `autoKeyAlgorithm: 'ML-KEM-*@spinium.com'` (no
+    curve/length parameters);
+  - key-vault keys: `kvKeyAlgorithm: 'ML-KEM-*@spinium.com'` (requires a
+    tr-key-vault server >= 1.0.0);
+  - readers: `escrowSecretKey` accepts AKP private JWKs
+    (`priv`/`pub`, unsuffixed variant in `alg`);
+  - CLI: the new algorithm values on `--auto-key-algorithm` and
+    `--kv-key-algorithm`.
+- In-package `mlKemKeyPairGen` in the key generator.
+
+### Changed
+
+- **Breaking:** dependency majors — `tr-jwe ^2.1.0` (brings `tr-kmac` as a
+  transitive dependency). The `AutoKeyAlgorithm`/`KvKeyAlgorithm` type
+  unions widened with the ML-KEM identifiers (a compile-time break for
+  exhaustive `switch`es over them).
+- RSA key-vault key generation no longer sends `keyLength` for non-RSA
+  algorithms (parameter hygiene; behaviour unchanged for existing
+  algorithms).
+
 ## [3.0.0] - 2026-07-04
 
 Optional integration with a [tr-key-vault](https://github.com/rinne/tr-key-vault)

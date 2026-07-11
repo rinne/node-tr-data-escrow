@@ -28,6 +28,32 @@ export type EcKeyCurve = (typeof EC_KEY_CURVES)[number];
 export const RSA_MODULUS_LENGTH_MIN = 2048;
 export const RSA_MODULUS_LENGTH_MAX = 16384;
 
+export const ML_KEM_VARIANTS = ['ML-KEM-512', 'ML-KEM-768', 'ML-KEM-1024'] as const;
+/** An ML-KEM (FIPS 203) parameter set; also the AKP JWK `alg` member value. */
+export type MlKemVariant = (typeof ML_KEM_VARIANTS)[number];
+
+/**
+ * The collision-resistant suffix of the ML-KEM JWE key-management algorithm
+ * identifiers implemented by tr-jwe (frozen at draft-ietf-jose-pqc-kem-05
+ * semantics). The JWE-level algorithm is the suffixed name; the AKP JWKs
+ * themselves carry the unsuffixed variant in `alg`.
+ */
+export const ML_KEM_JWE_ALG_SUFFIX = '@spinium.com';
+
+export const ML_KEM_JWE_ALGORITHMS = [
+  'ML-KEM-512@spinium.com',
+  'ML-KEM-768@spinium.com',
+  'ML-KEM-1024@spinium.com',
+] as const;
+export type MlKemJweAlgorithm = (typeof ML_KEM_JWE_ALGORITHMS)[number];
+
+/** The ML-KEM variant of a suffixed JWE algorithm name, or null. */
+export function mlKemVariantOfJweAlg(alg: string): MlKemVariant | null {
+  if (!alg.endsWith(ML_KEM_JWE_ALG_SUFFIX)) return null;
+  const variant = alg.slice(0, -ML_KEM_JWE_ALG_SUFFIX.length);
+  return ML_KEM_VARIANTS.includes(variant as MlKemVariant) ? (variant as MlKemVariant) : null;
+}
+
 /** Exports a node KeyObject pair as JWKs sharing a fresh random kid. */
 function exportPair(pair: {
   publicKey: { export(options: { format: 'jwk' }): Record<string, unknown> };
@@ -73,6 +99,22 @@ export async function rsaKeyPairGen(modulusLength: number): Promise<JwkKeyPair> 
     );
   }
   return exportPair(await generateKeyPair('rsa', { modulusLength }));
+}
+
+/**
+ * Generates an ML-KEM key pair (FIPS 203), asynchronously. Both JWKs share
+ * one random `kid`. Unlike the EC/RSA generators the JWKs DO carry an `alg`:
+ * node:crypto stamps the unsuffixed variant (e.g. `ML-KEM-768`) into the AKP
+ * JWK, and tr-jwe's key validation requires exactly that value, so it is
+ * deliberately preserved.
+ */
+export async function mlKemKeyPairGen(variant: MlKemVariant): Promise<JwkKeyPair> {
+  if (!ML_KEM_VARIANTS.includes(variant)) {
+    throw new TypeError('mlKemKeyPairGen: variant must be one of ML-KEM-512, ML-KEM-768, ML-KEM-1024');
+  }
+  return exportPair(
+    await generateKeyPair(variant.toLowerCase() as Parameters<typeof generateKeyPair>[0], {}),
+  );
 }
 
 const CIPHER_KEY_OPTS: Record<string, { keyLength: number; ops: string[] }> = {

@@ -15,8 +15,8 @@ retention, right-to-erasure with a sealed archive, incident forensics, and
 similar.
 
 - **Encrypt to a public key.** All metadata, data items, and per-file keys are
-  sealed as JWE to an RSA-OAEP or EC (ECDH-ES) escrow key. No decryption
-  capability lives in the writer.
+  sealed as JWE to an RSA-OAEP, EC (ECDH-ES), or post-quantum ML-KEM escrow
+  key. No decryption capability lives in the writer.
 - **One directory per escrow.** An escrow is a directory holding an
   `escrow.json` manifest and (when files are included) a `files/` directory of
   encrypted blobs. It is fully self-contained and relocatable — archive it,
@@ -119,12 +119,12 @@ escrow --escrow-key-file=./escrow-key.json --vault-directory=/escrow/vault \
 | `--escrow-key-file=<file>` | **Required unless `--auto-key` or `--kv-key` is given.** JSON file containing the public escrow JWK. Env fallback: `OPT_ESCROW_KEY_FILE`. |
 | `--vault-directory=<dir>` | **Required.** The vault directory. Env fallback: `OPT_VAULT_DIRECTORY`. |
 | `--auto-key` | Generate a per-escrow [auto key](#auto-key). Conflicts with `--kv-key`. |
-| `--auto-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, or `RSA-OAEP-256`. Env: `OPT_AUTO_KEY_ALGORITHM`. |
+| `--auto-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, `RSA-OAEP-256`, or `ML-KEM-{512,768,1024}@spinium.com`. Env: `OPT_AUTO_KEY_ALGORITHM`. |
 | `--auto-key-crv=<crv>` | EC curve for `ECDH-ES`: `P-256`, `P-384`, `P-521` (default). Env: `OPT_AUTO_KEY_CRV`. |
 | `--auto-key-length=<bits>` | RSA modulus length (default 4096; ignored for `ECDH-ES`). Env: `OPT_AUTO_KEY_LENGTH`. |
 | `--auto-key-output-file=<file>` | Write the generated auto key **private JWK** here (mode 0600; the path must not exist) — usable directly as `decrypt-escrow`'s secret key file. **Required** when `--auto-key` is given without `--escrow-key-file`. |
 | `--kv-key` | Generate the per-escrow key in a [key vault](#key-vault); the metadata is encrypted to it and the expiry is enforced by the vault (the key is deleted at expiry). Conflicts with `--auto-key`. |
-| `--kv-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, or `RSA-OAEP-256`. Env: `OPT_KV_KEY_ALGORITHM`. |
+| `--kv-key-algorithm=<alg>` | `ECDH-ES` (default), `RSA-OAEP`, `RSA-OAEP-256`, or `ML-KEM-{512,768,1024}@spinium.com`. Env: `OPT_KV_KEY_ALGORITHM`. |
 | `--kv-key-crv=<crv>` | EC curve for `ECDH-ES`: `P-256`, `P-384`, `P-521` (default). Env: `OPT_KV_KEY_CRV`. |
 | `--kv-key-length=<bits>` | RSA modulus length (default 4096; ignored for `ECDH-ES`). Env: `OPT_KV_KEY_LENGTH`. |
 | `--kv-url=<url>` | Key vault base URL. Env: `OPT_KV_URL`. |
@@ -277,11 +277,11 @@ write-testing `<vaultDir>/.tmp` (throws on failure).
 | `vaultDir`     | `string`         | —       | **Required.** The vault directory. |
 | `escrowKey`    | JWK (public) `\| null` | —  | **Required unless `autoKey` or `kvKey` is `true`.** See [Escrow keys](#escrow-keys). |
 | `autoKey`      | `boolean \| null` | `false` | Enable the per-escrow [auto key](#auto-key) layer. Mutually exclusive with `kvKey`. |
-| `autoKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| null` | `'ECDH-ES'` | Auto key algorithm. Validated even when unused. |
+| `autoKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| 'ML-KEM-{512,768,1024}@spinium.com' \| null` | `'ECDH-ES'` | Auto key algorithm. Validated even when unused. ML-KEM takes no curve/length. |
 | `autoKeyCrv`   | `'P-256' \| 'P-384' \| 'P-521' \| null` | `'P-521'` | EC curve for an `ECDH-ES` auto key. |
 | `autoKeyLength` | `number \| null` | `4096` | Modulus bits for RSA auto keys: an integer, 2048–16384. |
 | `kvKey`        | `boolean \| null` | `false` | Generate the per-escrow key in a [key vault](#key-vault). Mutually exclusive with `autoKey`. |
-| `kvKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| null` | `'ECDH-ES'` | Key-vault key algorithm. |
+| `kvKeyAlgorithm` | `'ECDH-ES' \| 'RSA-OAEP' \| 'RSA-OAEP-256' \| 'ML-KEM-{512,768,1024}@spinium.com' \| null` | `'ECDH-ES'` | Key-vault key algorithm. ML-KEM takes no curve/length. |
 | `kvKeyCrv`     | `'P-256' \| 'P-384' \| 'P-521' \| null` | `'P-521'` | EC curve for an `ECDH-ES` key-vault key. |
 | `kvKeyLength`  | `number \| null` | `4096` | Modulus bits for RSA key-vault keys. |
 | `kv`           | connection `\| KeyVaultClient \| null` | — | Key-vault connection: `{ url, user?, token?, timeout?, insecure?, ca? }` or a `tr-key-vault-client` instance. Required (here or per operation) when `kvKey` is on. |
@@ -355,15 +355,23 @@ The `escrowKey` must be a **public** JWK carrying a non-empty `kid`, one of:
   modulus **≥ 2048 bits**. Sealed with that algorithm.
 - **EC** — `{ kty: 'EC', crv: 'P-256' | 'P-384' | 'P-521', kid, x, y }`. Sealed
   with `ECDH-ES`.
+- **AKP (ML-KEM, post-quantum)** —
+  `{ kty: 'AKP', alg: 'ML-KEM-512' | 'ML-KEM-768' | 'ML-KEM-1024', kid, pub }`.
+  Sealed with the corresponding `ML-KEM-*@spinium.com` JWE algorithm —
+  tr-jwe's collision-resistant identifiers, frozen at
+  draft-ietf-jose-pqc-kem-05 semantics. Note that the JWK `alg` member
+  carries the **unsuffixed** variant, as JOSE-level key validation requires.
 
-A key carrying private material (an RSA/EC `d` member) is rejected — the writer
-must not be able to hold decryption power. The key's `kid` is recorded in the
-manifest and the JWE headers so a reader can select the right private key.
+A key carrying private material (an RSA/EC `d` or AKP `priv` member) is
+rejected — the writer must not be able to hold decryption power. The key's
+`kid` is recorded in the manifest and the JWE headers so a reader can select
+the right private key.
 
 Generate keys with [`tr-jwk`](https://www.npmjs.com/package/tr-jwk)
-(`ecKeyGen('P-521')` returns `{ secretKey, publicKey }`); keep the public half
-in the writer and the secret half under separate custody. The `auto:` kid
-prefix is reserved for [auto keys](#auto-key) and rejected here.
+(`ecKeyGen('P-521')` and `mlKemKeyGen('ML-KEM-768')` return
+`{ secretKey, publicKey }`); keep the public half in the writer and the secret
+half under separate custody. The `auto:` kid prefix is reserved for
+[auto keys](#auto-key) and rejected here.
 
 ## Auto key
 
@@ -501,8 +509,9 @@ dec.destroy();
 
 `escrowSecretKey`: one secret JWK or a non-empty array of them, each with a
 unique non-empty `kid` (escrows select their key by kid). RSA needs `d` and a
-modulus ≥ 2048 bits (`alg`, when present, must be `"RSA-OAEP"`); EC needs `d`
-and `crv` P-256/384/521. Synchronous, no I/O.
+modulus ≥ 2048 bits (`alg`, when present, must be `"RSA-OAEP"` or
+`"RSA-OAEP-256"`); EC needs `d` and `crv` P-256/384/521; AKP (ML-KEM) needs
+`priv`, `pub`, and the unsuffixed variant in `alg`. Synchronous, no I/O.
 
 ### `decrypt(escrowObject, options?): Promise<DataEscrowDecryptOperation>`
 

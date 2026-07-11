@@ -139,6 +139,9 @@ describe('auto key — round-trip per algorithm', () => {
     { name: 'ECDH-ES P-521', algorithm: 'ECDH-ES', crv: 'P-521' },
     { name: 'RSA-OAEP', algorithm: 'RSA-OAEP', crv: undefined },
     { name: 'RSA-OAEP-256', algorithm: 'RSA-OAEP-256', crv: undefined },
+    { name: 'ML-KEM-512', algorithm: 'ML-KEM-512@spinium.com', crv: undefined },
+    { name: 'ML-KEM-768', algorithm: 'ML-KEM-768@spinium.com', crv: undefined },
+    { name: 'ML-KEM-1024', algorithm: 'ML-KEM-1024@spinium.com', crv: undefined },
   ] as const;
   for (const c of cases) {
     it(`escrows and decrypts with a ${c.name} auto key`, async () => {
@@ -162,6 +165,13 @@ describe('auto key — round-trip per algorithm', () => {
         expect(pair.secretKey.alg).toBe(c.algorithm);
         expect(pair.publicKey.alg).toBe(c.algorithm);
         expect(Buffer.from(pair.publicKey.n as string, 'base64url')).toHaveLength(2048 / 8);
+      } else if (c.algorithm.startsWith('ML-KEM')) {
+        // AKP JWKs carry the unsuffixed variant; the JWE alg is suffixed.
+        expect(pair.secretKey.kty).toBe('AKP');
+        expect(pair.secretKey.alg).toBe(c.algorithm.replace('@spinium.com', ''));
+        expect(pair.publicKey.alg).toBe(c.algorithm.replace('@spinium.com', ''));
+        expect(typeof pair.secretKey.priv).toBe('string');
+        expect(pair.publicKey.priv).toBeUndefined();
       } else {
         expect(pair.secretKey.kty).toBe('EC');
         expect(pair.secretKey.crv).toBe(c.crv);
